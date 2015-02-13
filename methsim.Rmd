@@ -1,0 +1,677 @@
+---
+title: "methsim"
+author: "Peter Hickey"
+date: "09/03/2015"
+output: html_document
+---
+
+```{r}
+library(methsim)
+library(BiocParallel)
+library(ggplot2)
+thesis_theme <- theme_classic(base_size = 20)
+thesis_theme <- theme_bw(base_size = 20)
+```
+
+# Partition the methylomes
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+library(BSgenome.Hsapiens.UCSC.hg19)
+nc <- 4L
+nr <- 3L
+register(MulticoreParam(12L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distributions
+# NB: The alpha distributions are mostly less than one. 
+# Nevertheless, I will still seek to identify PMRs in all samples.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "chr1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], 
+                   " because a minimum number  of Cpgs satisfying the ", 
+                   "FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Hsapiens), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
+  partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
+  }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+```
+
+## Lister
+
+```{r}
+dataset <- "Lister"
+library(BSgenome.Hsapiens.UCSC.hg18)
+nc <- 5L
+nr <- 4L
+register(MulticoreParam(17L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distributions
+# NB: Somatic cell lines have bimodal alpha distribution with heavy right tail. 
+# Other cell lines have a much lighter right tail.
+# Nevertheless, I will still seek to identify PMRs in all samples.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "chr1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], " because a minimum number ", 
+                   "of Cpgs satisfying the FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Drop chrL
+l_msrgr <- bplapply(l_msrgr, function(msrgr) {
+  dropSeqlevels(msrgr, "chrL")
+  })
+l_pmrs <- bplapply(l_pmrs, function(pmrs) {
+  dropSeqlevels(pmrs, "chrL")
+  })
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Hsapiens), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  sul[["segments.gr"]]
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+rm(l_sul)
+
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+```
+
+## Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+library(BSgenome.Mmusculus.UCSC.mm10)
+seqlevelsStyle(Mmusculus) <- 'NCBI'
+nc <- 3L
+nr <- 1L
+register(MulticoreParam(3L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distributions
+# The E16.5_male_1 alpha distribution is bimodal with a very heavy right tail.
+# The E6.5_epiblast_1 alpha distribution is a multimodal/uniform mess.
+# The J1_1 alpha distribution is unimodal with most values less than 1.
+# Nevertheless, I will still seek to identify PMRs in all samples.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], " because a minimum number ", 
+                   "of Cpgs satisfying the FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Mmusculus), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  sul[["segments.gr"]]
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+```
+
+```{r}
+dataset <- "Ziller_merged"
+library(BSgenome.Hsapiens.UCSC.hg19)
+nc <- 3L
+nr <- 3L
+register(MulticoreParam(8L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", gsub("_merged", "", dataset), 
+                          "/", dataset, "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distribution
+# The colon tumour, colon primary and cell line samples' alpha distributions 
+# have a fairly heavy right tail. The cortex samples' alpha distributions are
+# unimodal and mostly less than one.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "chr1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], " because a minimum number ", 
+                   "of Cpgs satisfying the FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Hsapiens), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  sul[["segments.gr"]]
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+```
+
+# Analyse partition types
+
+__TODO: Look at the distribution of key statistics in each of _UMRs_, _LMRs_, _PMRs_, and _other_ region types__.
+
