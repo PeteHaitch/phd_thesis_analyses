@@ -323,11 +323,11 @@ pdf(file = paste0(umrs_lmrs_dir, dataset,
     height = 9, width = 16)
 par(mfcol = c(nr, nc))
 l_umrs_lmrs <- mapply(function(sul, sn) {
-  sul[["segments.gr"]]
   smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
                 xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
                 xlim = c(0, 16), ylim = c(0, 60))
   abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
   }, sul = l_sul, sn = names(l_sul))
 dev.off()
 rm(l_sul)
@@ -488,11 +488,11 @@ pdf(file = paste0(umrs_lmrs_dir, dataset,
     height = 9, width = 16)
 par(mfcol = c(nr, nc))
 l_umrs_lmrs <- mapply(function(sul, sn) {
-  sul[["segments.gr"]]
   smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
                 xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
                 xlim = c(0, 16), ylim = c(0, 60))
   abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
   }, sul = l_sul, sn = names(l_sul))
 dev.off()
 
@@ -512,6 +512,8 @@ partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
 ```
+
+## Ziller
 
 ```{r}
 dataset <- "Ziller_merged"
@@ -647,11 +649,11 @@ pdf(file = paste0(umrs_lmrs_dir, dataset,
     height = 9, width = 16)
 par(mfcol = c(nr, nc))
 l_umrs_lmrs <- mapply(function(sul, sn) {
-  sul[["segments.gr"]]
   smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
                 xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
                 xlim = c(0, 16), ylim = c(0, 60))
   abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
   }, sul = l_sul, sn = names(l_sul))
 dev.off()
 # Final segmentation
