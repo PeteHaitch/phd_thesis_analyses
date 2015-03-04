@@ -5,15 +5,23 @@ date: "09/03/2015"
 output: html_document
 ---
 
+# Preliminaries
+
 ```{r}
 library(methsim)
 library(BiocParallel)
 library(ggplot2)
-thesis_theme <- theme_classic(base_size = 20)
-thesis_theme <- theme_bw(base_size = 20)
+library(devtools)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
 # Partition the methylomes
+
+Set seed for reproducibility:
+
+```{r}
+set.seed(666)
+```
 
 ## EPISCOPE
 
@@ -177,6 +185,8 @@ l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Hsapiens.UCSC.hg19", unload = TRUE)
 ```
 
 ## Lister
@@ -350,6 +360,8 @@ l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Hsapiens.UCSC.hg18", unload = TRUE)
 ```
 
 ## Seisenberger
@@ -517,6 +529,8 @@ l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Mmusculus.UCSC.mm10", unload = TRUE)
 ```
 
 ## Ziller
@@ -680,9 +694,652 @@ l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Hsapiens.UCSC.hg19", unload = TRUE)
 ```
 
-# Analyse partition types
+# Helper functions
 
-__TODO: Look at the distribution of key statistics in each of _UMRs_, _LMRs_, _PMRs_, and _other_ region types__.
+These are helper functions used in this script. Versions of these functions may 
+eventually end up in the `methsim` package.
+
+```{r}
+process_one_tuples <- function(dataset, seqlevels, min_cov) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_1_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Compute beta-values and annotate by region type
+  beta <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, 
+                                         seqlevels) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::methLevel()
+    val <- funByPM(FUN = MethylationTuples::methLevel, pm = pm, 
+                   methpat = methpat, min_cov = min_cov)
+    # Add information not returned by methLevel()
+    val[, sample := sn]
+    setnames(val, c("beta", "type", "sample"))
+    setkeyv(val, c("sample", "type", "beta"))
+    val
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels)
+  beta <- rbindlist(beta)
+  # Tabulate frequency of each beta-value by sample and type.
+  beta[, .N, by = list(sample, type, beta)]
+}
+```
+
+```{r}
+process_two_tuples <- function(dataset, seqlevels, min_cov) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_2_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Compute beta-values and annotate by region type
+  lor <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, seqlevels,  
+                                        method, offset) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::cometh()
+    funByPM(MethylationTuples::cometh, pm = pm, methpat = methpat, 
+            min_cov = min_cov, method = method, offset = offset)
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels, 
+    method = "lor", offset = 0.5)
+  lor <- rbindlist(lor)
+  # NOTE: This ignores strand.
+  lor_reduced <- lor[, IPD := pos2 - pos1][
+    , list(IPD, sample, type, statistic)][
+      , .N, by = list(sample, IPD, type, statistic)]
+  setorder(lor_reduced, sample, IPD, type, -N)
+  lor_reduced
+}
+```
+
+```{r}
+process_three_tuples <- function(dataset, seqlevels, min_cov) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_3_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Estimate the relative frequencies of methylation patterns at m-tuples
+  pattern_freqs <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, 
+                                                  seqlevels) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::patternFreqs()
+    funByPM(MethylationTuples::patternFreqs, pm = pm, methpat = methpat, 
+            min_cov = min_cov)
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels)
+  pattern_freqs <- rbindlist(pattern_freqs)
+  grp <- c("sample", "type", grep("^h[0-9]", colnames(pattern_freqs), 
+                                  value = TRUE))
+  pattern_freqs_reduced <- pattern_freqs[, .N, by = grp]
+  setorder(pattern_freqs_reduced, sample, type, -N)
+  pattern_freqs_reduced
+}
+```
+
+
+## Long term TODOs
+
+These issues came up when writing the above helper functions:
+
+- Why can't I pass `FUN = functionName` to the top-level `bplapply()` function?
+- Find a neater way to split MethPat object by sample than what I use in the 
+above. More specifically, devise a neat way to split a `SummarizedExperiment` 
+by column (sample).
+
+# Compute summary statistics stratified by partition types
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+register(MulticoreParam(12L))
+autosomes <- paste0('chr', 1:22)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+## Lister
+
+```{r}
+dataset <- "Lister"
+register(MulticoreParam(17L))
+autosomes <- paste0('chr', 1:22)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+## Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+register(MulticoreParam(3L))
+autosomes <- as.character(1:19)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+## Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+register(MulticoreParam(8L))
+autosomes <- paste0('chr', 1:22)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+# Plots
+
+```{r}
+thesis_theme <- theme_classic(base_size = 20)
+thesis_theme <- theme_bw(base_size = 20)
+```
+
+## Helper functions
+
+These are helper functions used in this section. Versions of these functions may 
+eventually end up in the `methsim` or `MethylationTuples` packages.
+
+```{r}
+# A wrapper to boxplot.stats() designed for use with data.table objects where 
+# observations are already aggregated into "table" form.
+bps <- function(value, times) {
+  unlist(boxplot.stats(rep(value, times = times), do.out = FALSE))
+}
+
+# A function to plot a boxplot of beta values by region type.
+betaBoxPlot <- function(beta_reduced, dataset, min_cov, ncol, nrow) {
+  setkey(beta_reduced, sample, type)
+  beta_reduced <- beta_reduced[, as.list(bps(beta, N)), by = key(beta_reduced)]
+  g <- ggplot(beta_reduced, aes(x = type, ymin = stats1, lower = stats2,
+                                middle = stats3, upper = stats4, ymax = stats5, 
+                                group = type, colour = type)) +
+    geom_boxplot(stat = "identity") + 
+    facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+    thesis_theme + 
+    scale_colour_brewer(palette = "Dark2") +
+    ggtitle(paste0(dataset, ": min_cov = ", min_cov))
+  g
+}
+
+# A function to plot the quantiles of the co-methylation distribution by region 
+# type.
+quantileLORPlot <- function(lor_reduced, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                            dataset, min_cov, xmax, ymin, ymax, pair_type, 
+                            ncol, nrow) {
+  if (!identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9)) & 
+        !identical(probs, 0.5)) {
+    stop("'probs' must be 'c(0.1, 0.25, 0.5, 0.75, 0.9)' or 'c(0.5)'.")
+    }
+  q <- lor_reduced[, as.list(quantile(rep(statistic, N), probs, na.rm = TRUE)), 
+                   by = list(sample, IPD, type)]
+  g <- ggplot(aes(x = IPD, y = `50%`, colour = type, fill = type), data = q) +
+    scale_colour_brewer(palette = "Dark2") + 
+    scale_fill_brewer(palette = "Dark2") + 
+    ylab(bquote(atop(log[2]("odds ratio"),
+                     "Restricted to [" * .(ymin) * ", " * .(ymax) * "]"))) + 
+    geom_line(size = 1.5)
+  if (identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9))) {
+    g <- g + geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, 
+                         linetype = 0) + 
+      geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0)
+    }
+  g <- g + geom_hline(aes(yint = 0), linetype = 2) +
+    xlim(c(0, xmax)) +
+    coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
+    facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+    thesis_theme 
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  }
+  if (xmax < max(lor_reduced[, IPD])) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+# A function to plot the frequencies of the haplotypes by region type.
+patternFreqsPlot <- function(pattern_freqs_reduced, dataset, min_cov, ncol, 
+                             nrow) {
+  h <- grep("^h[0-9]", colnames(pattern_freqs_reduced), value = TRUE)
+  setkey(pattern_freqs_reduced, sample, type)
+  h <- parse(text = paste0(h, "\n"))
+  x <- bplapply(h, function(h_i, pattern_freqs_reduced) {
+    pattern_freqs_reduced[, as.list(bps(eval(h_i), N)), 
+                          by = key(pattern_freqs_reduced)][, 
+                                                           "h" := deparse(h_i)]
+    }, pattern_freqs_reduced = pattern_freqs_reduced)
+  x <- rbindlist(x)
+  
+  g <- ggplot(x, aes(x = h, ymin = stats1, lower = stats2, middle = stats3,
+                     upper = stats4, ymax = stats5, 
+                     group = interaction(h, type), colour = type)) +
+    geom_boxplot(stat = "identity") + 
+    facet_wrap(~ sample, ncol = ncol, nrow = nrow) +
+    thesis_theme + 
+    scale_colour_brewer(palette = "Dark2") +
+    ggtitle(paste0(dataset, ": min_cov = ", min_cov))
+  g
+}
+```
+
+### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+ncol <- 4
+nrow <- 3
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_quantiles_by_pm_boxplots/")
+dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
+              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
+dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### Lister
+
+```{r}
+dataset <- "Lister"
+ncol <- 5
+nrow <- 4
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_quantiles_by_pm_boxplots/")
+dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
+              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
+dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+ncol <- 3
+nrow <- 1
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_quantiles_by_pm_boxplots/")
+dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
+              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
+dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+ncol <- 3
+nrow <- 3
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_quantiles_by_pm_boxplots/")
+dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
+              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
+dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+# Session info
+
+```{r}
+devtools::session_info()
+```
+
 
