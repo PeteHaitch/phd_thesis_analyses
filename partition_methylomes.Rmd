@@ -809,7 +809,6 @@ process_three_tuples <- function(dataset, seqlevels, min_cov) {
 }
 ```
 
-
 ## Long term TODOs
 
 These issues came up when writing the above helper functions:
@@ -1034,16 +1033,34 @@ bps <- function(value, times) {
 
 # A function to plot a boxplot of beta values by region type.
 betaBoxPlot <- function(beta_reduced, dataset, min_cov, ncol, nrow) {
+    
+  # Compute boxplot summary statistics
   setkey(beta_reduced, sample, type)
   beta_reduced <- beta_reduced[, as.list(bps(beta, N)), by = key(beta_reduced)]
-  g <- ggplot(beta_reduced, aes(x = type, ymin = stats1, lower = stats2,
-                                middle = stats3, upper = stats4, ymax = stats5, 
-                                group = type, colour = type)) +
-    geom_boxplot(stat = "identity") + 
-    facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
-    thesis_theme + 
-    scale_colour_brewer(palette = "Dark2") +
-    ggtitle(paste0(dataset, ": min_cov = ", min_cov))
+  
+  # If there is more than one sample then facet by 'sample' and use colour to 
+  # indicate 'type'.
+  if (beta_reduced[, length(unique(sample))] > 1L) {
+    
+    g <- ggplot(beta_reduced, aes(x = type, ymin = stats1, lower = stats2,
+                                  middle = stats3, upper = stats4, ymax = stats5, 
+                                  group = type, colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+  } else {
+    # If there is only one 'sample' then use colour to indicate 'type'. No need
+    # for faceting.
+    g <- ggplot(beta_reduced, aes(x = type, ymin = stats1, lower = stats2,
+                                  middle = stats3, upper = stats4, ymax = stats5, 
+                                  group = type, colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+  }
   g
 }
 
@@ -1052,41 +1069,82 @@ betaBoxPlot <- function(beta_reduced, dataset, min_cov, ncol, nrow) {
 quantileLORPlot <- function(lor_reduced, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
                             dataset, min_cov, xmax, ymin, ymax, pair_type, 
                             ncol, nrow) {
+
+    # Compute quantiles
   if (!identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9)) & 
         !identical(probs, 0.5)) {
     stop("'probs' must be 'c(0.1, 0.25, 0.5, 0.75, 0.9)' or 'c(0.5)'.")
-    }
+  }
   q <- lor_reduced[, as.list(quantile(rep(statistic, N), probs, na.rm = TRUE)), 
                    by = list(sample, IPD, type)]
-  g <- ggplot(aes(x = IPD, y = `50%`, colour = type, fill = type), data = q) +
-    scale_colour_brewer(palette = "Dark2") + 
-    scale_fill_brewer(palette = "Dark2") + 
-    ylab(bquote(atop(log[2]("odds ratio"),
-                     "Restricted to [" * .(ymin) * ", " * .(ymax) * "]"))) + 
-    geom_line(size = 1.5)
-  if (identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9))) {
-    g <- g + geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, 
-                         linetype = 0) + 
-      geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0)
+  
+  # If there is more than one sample then facet by 'sample' and use colour to 
+  # indicate 'type'.
+  if (lor_reduced[, length(unique(sample))] > 1L) {
+    g <- ggplot(aes(x = IPD, y = `50%`, colour = type, fill = type), data = q) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2") + 
+      ylab(bquote(atop(log[2]("odds ratio"),
+                       "Restricted to [" * .(ymin) * ", " * .(ymax) * "]"))) + 
+      geom_line(size = 1.5)
+    if (identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9))) {
+      g <- g + geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, 
+                           linetype = 0) + 
+        geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0)
     }
-  g <- g + geom_hline(aes(yint = 0), linetype = 2) +
-    xlim(c(0, xmax)) +
-    coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
-    facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
-    thesis_theme 
-  if (pair_type == "all") {
-    g <- g +
-      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
-                       .(min_cov) * " )"))
-  } else if (pair_type == "adjacent") {
-    g <- g +
-      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
-                       .(min_cov) * " )"))
-  }
-  if (xmax < max(lor_reduced[, IPD])) {
-    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+    g <- g + geom_hline(aes(yint = 0), linetype = 2) +
+      xlim(c(0, xmax)) +
+      coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
+      facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+      thesis_theme 
+    if (pair_type == "all") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    } else if (pair_type == "adjacent") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    }
+    if (xmax < max(lor_reduced[, IPD])) {
+      g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+    } else {
+      g <- g + xlab(label = "IPD (bp)")
+    }
   } else {
-    g <- g + xlab(label = "IPD (bp)")
+    # If there is only one 'sample' then facet by 'type' and also use colour to 
+    # indicate 'type'.
+    g <- ggplot(aes(x = IPD, y = `50%`, colour = type, fill = type, 
+                    group = type), data = q) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2") + 
+      ylab(bquote(atop(log[2]("odds ratio"),
+                       "Restricted to [" * .(ymin) * ", " * .(ymax) * "]"))) + 
+      geom_line(size = 1.5)
+    if (identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9))) {
+      g <- g + geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, 
+                           linetype = 0) + 
+        geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0)
+    }
+    g <- g + geom_hline(aes(yint = 0), linetype = 2) +
+      xlim(c(0, xmax)) +
+      coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
+      facet_wrap(~ type, ncol = 4L) + 
+      thesis_theme 
+    if (pair_type == "all") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    } else if (pair_type == "adjacent") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    }
+    if (xmax < max(lor_reduced[, IPD])) {
+      g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+    } else {
+      g <- g + xlab(label = "IPD (bp)")
+    }
   }
   g
 }
@@ -1094,6 +1152,8 @@ quantileLORPlot <- function(lor_reduced, probs = c(0.1, 0.25, 0.5, 0.75, 0.9),
 # A function to plot the frequencies of the haplotypes by region type.
 patternFreqsPlot <- function(pattern_freqs_reduced, dataset, min_cov, ncol, 
                              nrow) {
+  
+  # Compute boxplot statistics
   h <- grep("^h[0-9]", colnames(pattern_freqs_reduced), value = TRUE)
   setkey(pattern_freqs_reduced, sample, type)
   h <- parse(text = paste0(h, "\n"))
@@ -1104,14 +1164,28 @@ patternFreqsPlot <- function(pattern_freqs_reduced, dataset, min_cov, ncol,
     }, pattern_freqs_reduced = pattern_freqs_reduced)
   x <- rbindlist(x)
   
-  g <- ggplot(x, aes(x = h, ymin = stats1, lower = stats2, middle = stats3,
-                     upper = stats4, ymax = stats5, 
-                     group = interaction(h, type), colour = type)) +
-    geom_boxplot(stat = "identity") + 
-    facet_wrap(~ sample, ncol = ncol, nrow = nrow) +
-    thesis_theme + 
-    scale_colour_brewer(palette = "Dark2") +
-    ggtitle(paste0(dataset, ": min_cov = ", min_cov))
+  # If there is more than one sample then facet by 'sample' and use colour to 
+  # indicate 'type'.
+  if (pattern_freqs_reduced[, length(unique(sample))] > 1L) {
+    g <- ggplot(x, aes(x = h, ymin = stats1, lower = stats2, middle = stats3,
+                       upper = stats4, ymax = stats5, 
+                       group = interaction(h, type), colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      facet_wrap(~ sample, ncol = ncol, nrow = nrow) +
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+  } else {
+    # If there is only one 'sample' then facet by 'type' and also use colour to 
+    # indicate 'type'.
+    g <- ggplot(x, aes(x = h, ymin = stats1, lower = stats2, middle = stats3,
+                       upper = stats4, ymax = stats5, 
+                       group = interaction(h, type), colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+  }
   g
 }
 ```
@@ -1147,11 +1221,11 @@ lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset,
 g <- quantileLORPlot(lor_reduced = lor_reduced, 
                      probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
                      min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
-lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
-                                 "/lor_quantiles_by_pm_boxplots/")
-dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
-              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
 rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
 
 # 3-tuples
@@ -1162,11 +1236,11 @@ pattern_freqs_reduced <- readRDS(paste0("rds/", dataset,
 g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
                       dataset = dataset, min_cov = min_cov, ncol = ncol, 
                       nrow = nrow)
-pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
-  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
-dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
-              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
        width = 16)
 rm(min_cov, pattern_freqs_reduced, g)
 ```
@@ -1202,11 +1276,11 @@ lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset,
 g <- quantileLORPlot(lor_reduced = lor_reduced, 
                      probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
                      min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
-lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
-                                 "/lor_quantiles_by_pm_boxplots/")
-dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
-              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
 rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
 
 # 3-tuples
@@ -1217,11 +1291,11 @@ pattern_freqs_reduced <- readRDS(paste0("rds/", dataset,
 g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
                       dataset = dataset, min_cov = min_cov, ncol = ncol, 
                       nrow = nrow)
-pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
-  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
-dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
-              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
        width = 16)
 rm(min_cov, pattern_freqs_reduced, g)
 ```
@@ -1257,11 +1331,11 @@ lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset,
 g <- quantileLORPlot(lor_reduced = lor_reduced, 
                      probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
                      min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
-lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
-                                 "/lor_quantiles_by_pm_boxplots/")
-dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
-              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
 rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
 
 # 3-tuples
@@ -1272,11 +1346,11 @@ pattern_freqs_reduced <- readRDS(paste0("rds/", dataset,
 g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
                       dataset = dataset, min_cov = min_cov, ncol = ncol, 
                       nrow = nrow)
-pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
-  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
-dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
-              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
        width = 16)
 rm(min_cov, pattern_freqs_reduced, g)
 ```
@@ -1312,11 +1386,11 @@ lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset,
 g <- quantileLORPlot(lor_reduced = lor_reduced, 
                      probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
                      min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
-lor_quantiles_by_pm_boxplots_dir <- paste0("pdf/", dataset, 
-                                 "/lor_quantiles_by_pm_boxplots/")
-dir.create(lor_quantiles_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(lor_quantiles_by_pm_boxplots_dir, dataset,
-              "_lor_quantiles_by_pm_boxplots.pdf"), g, height = 9, width = 16)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
 rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
 
 # 3-tuples
@@ -1327,11 +1401,72 @@ pattern_freqs_reduced <- readRDS(paste0("rds/", dataset,
 g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
                       dataset = dataset, min_cov = min_cov, ncol = ncol, 
                       nrow = nrow)
-pattern_freqs_boxplot_by_pm_boxplots_dir <- paste0(
-  "pdf/", dataset, "/pattern_freqs_boxplot_by_pm_boxplots/")
-dir.create(pattern_freqs_boxplot_by_pm_boxplots_dir, recursive = TRUE)
-ggsave(paste0(pattern_freqs_boxplot_by_pm_boxplots_dir, dataset,
-              "_pattern_freqs_boxplot_by_pm_boxplots.pdf"), g, height = 9, 
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### ADS
+
+Create the above plots `betaBoxPlot()`, `quantileLORPlot()` and `patternFreqsPlot()` for just the _ADS_ sample.
+
+```{r}
+dataset <- "Lister"
+sample_name <- "ADS"
+ncol <- 1
+nrow <- 1
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+beta_reduced <- beta_reduced[sample == sample_name, ]
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = sample_name, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, sample_name, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+lor_reduced <- lor_reduced[sample == sample_name, ]
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = sample_name, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, sample_name,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+pattern_freqs_reduced <- pattern_freqs_reduced[sample == sample_name, ]
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = sample_name, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, sample_name,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
        width = 16)
 rm(min_cov, pattern_freqs_reduced, g)
 ```
