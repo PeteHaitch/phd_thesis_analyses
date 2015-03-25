@@ -801,7 +801,7 @@ process_three_tuples <- function(dataset, seqlevels, min_cov) {
             min_cov = min_cov)
     }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels)
   pattern_freqs <- rbindlist(pattern_freqs)
-  grp <- c("sample", "type", grep("^h[0-9]", colnames(pattern_freqs), 
+  grp <- c("sample", "type", grep("^w[0-9]", colnames(pattern_freqs), 
                                   value = TRUE))
   pattern_freqs_reduced <- pattern_freqs[, .N, by = grp]
   setorder(pattern_freqs_reduced, sample, type, -N)
@@ -1154,37 +1154,47 @@ patternFreqsPlot <- function(pattern_freqs_reduced, dataset, min_cov, ncol,
                              nrow) {
   
   # Compute boxplot statistics
-  h <- grep("^h[0-9]", colnames(pattern_freqs_reduced), value = TRUE)
+  w_cn <- grep("^w[0-9]", colnames(pattern_freqs_reduced), value = TRUE)
   setkey(pattern_freqs_reduced, sample, type)
-  h <- parse(text = paste0(h, "\n"))
-  x <- bplapply(h, function(h_i, pattern_freqs_reduced) {
-    pattern_freqs_reduced[, as.list(bps(eval(h_i), N)), 
+  parsed_w_cn <- parse(text = paste0(w_cn, "\n"))
+  x <- bplapply(parsed_w_cn, function(parsed_w_cn_, pattern_freqs_reduced) {
+    pattern_freqs_reduced[, as.list(bps(eval(parsed_w_cn_), N)), 
                           by = key(pattern_freqs_reduced)][, 
-                                                           "h" := deparse(h_i)]
+                                                           "w" := deparse(parsed_w_cn_)]
     }, pattern_freqs_reduced = pattern_freqs_reduced)
   x <- rbindlist(x)
-  
+
   # If there is more than one sample then facet by 'sample' and use colour to 
   # indicate 'type'.
   if (pattern_freqs_reduced[, length(unique(sample))] > 1L) {
-    g <- ggplot(x, aes(x = h, ymin = stats1, lower = stats2, middle = stats3,
+    g <- ggplot(x, aes(x = w, ymin = stats1, lower = stats2, middle = stats3,
                        upper = stats4, ymax = stats5, 
-                       group = interaction(h, type), colour = type)) +
+                       group = interaction(w, type), colour = type)) +
       geom_boxplot(stat = "identity") + 
       facet_wrap(~ sample, ncol = ncol, nrow = nrow) +
       thesis_theme + 
       scale_colour_brewer(palette = "Dark2") +
-      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) +
+      scale_x_discrete(labels = 
+                         parse(text = paste0(substring(unique(sort(x[, w])), 1, 1), 
+                                             "[", 
+                                             substring(unique(sort(x[, w])), 2), 
+                                             "]\n")))
   } else {
     # If there is only one 'sample' then facet by 'type' and also use colour to 
     # indicate 'type'.
-    g <- ggplot(x, aes(x = h, ymin = stats1, lower = stats2, middle = stats3,
+    g <- ggplot(x, aes(x = w, ymin = stats1, lower = stats2, middle = stats3,
                        upper = stats4, ymax = stats5, 
-                       group = interaction(h, type), colour = type)) +
+                       group = interaction(w, type), colour = type)) +
       geom_boxplot(stat = "identity") + 
       thesis_theme + 
       scale_colour_brewer(palette = "Dark2") +
-      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) + 
+      scale_x_discrete(labels = 
+                         parse(text = paste0(substring(unique(sort(x[, w])), 1, 1), 
+                                             "[", 
+                                             substring(unique(sort(x[, w])), 2), 
+                                             "]\n")))
   }
   g
 }
@@ -1476,5 +1486,3 @@ rm(min_cov, pattern_freqs_reduced, g)
 ```{r}
 devtools::session_info()
 ```
-
-
