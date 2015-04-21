@@ -62,6 +62,8 @@ g <- ggplot(x, aes(x = Dinucleotide, y = Observed / Expected)) +
   thesis_theme +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   geom_hline(yintercept = 1, linetype = 2)
+g
+g
 ggsave("dinucleotide_frequency_hg19.pdf", g, height = 9, width = 16)
 ```
 
@@ -71,6 +73,7 @@ Chromosome 19 has the highest CpG density of the autosomes in the human referenc
 ```{r cpg_frequency}
 cpg_density <- data.frame(Chromosome = colnames(df), 
                           Percentage = df['CG', ] / colSums(df) * 100)
+knitr::kable(cpg_density, align = "c")
 write.table(cpg_density, "CpG_density_hg19.txt", col.names = TRUE, 
             row.names = FALSE, quote = FALSE)
 ```
@@ -123,6 +126,7 @@ g <- ggplot(aes(x = IPD, colour = Source), data = ipd_df) +
   ggtitle("Human reference genome (hg19)") + 
   scale_color_brewer(palette = "Dark2") + 
   ylab("Proportion of CpGs within given distance")
+g
 ggsave("IPD_ECDF_hg19.pdf", g, width = 16, height = 9)
 ```
 
@@ -146,6 +150,7 @@ g <- ggplot(aes(x = IPD, y = Count),
   ggtitle("Human reference genome (hg19)") +
   scale_y_continuous(labels = comma) +
   thesis_theme
+g
 ggsave("IPD_frequency_polygon_hg19.pdf", g, width = 16, height = 9)
 ```
 
