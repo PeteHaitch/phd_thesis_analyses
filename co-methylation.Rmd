@@ -65,6 +65,498 @@ detach("package:BSgenome.Mmusculus.UCSC.mm10", unload = TRUE)
 
 # Mantel-Haenszel estimation of within-fragment co-methylation
 
+## Simulation study 
+
+### Helper functions
+
+```{r}
+# Requires the installation of mipfp
+library(mipfp)
+
+# rtpois is a helper function to simulate n truncated Poisson(lambda) RVs with
+# truncation specified by 'trunc'.
+# It is adapted from a method for simulating zero-truncated Poisson suggested
+# by Peter Dalgaard https://stat.ethz.ch/pipermail/r-help/2005-May/070680.html
+rtpois <- function(n, lambda, trunc) {
+  qpois(runif(n, ppois(trunc, lambda), 1), lambda)
+}
+
+# rtnbinom is a helper function to simulate n truncated NB(mu, size) RVs with
+# truncation specified by 'trunc'. It uses a more explicit approach to simulate 
+# truncated RVs han rtpois() because the same trick doesn't immediately work
+# for NB-distributed RVs.
+rtnbinom <- function(n, mu = 30, size = 10, trunc = 9) {
+  x <- rnbinom(n, size = size, mu = mu)
+  i <- x <= trunc
+  while (any(i)) {
+    x[i] <- rnbinom(sum(i), size = size, mu = mu)
+    i <- x <= trunc
+  }
+  x
+}
+
+# Function to simulate 2x2xK tables.
+# Each 2x2 table represents the counts of unmethylated (0) and methylated (1) 
+# states at each CpG for each read.
+# The number of reads per table (i.e., 2x2 table sample size) is simulated
+# from a truncated NB(mu, size) distribution; truncation is to simulate
+# minimum coverage cutoffs and is specified by the 'trunc' argument.
+# The marginal probabilities of each table are p1 = Prob(methylated at first 
+# CpG) and p2 = Prob(methylated at second CpG) and should be of length K or 1 (
+# in which case all K tables have the same p1 and/or p2).
+# The odds ratio (or) is for each 2x2 table and should be of length K or 1 (in
+# which case all K tables have the same odds ratio).
+simTables <- function(K, mu, size, trunc, p1, p2, or) {
+
+  # d is the sample size of each 2x2 table (i.e, the sequencing depth for the 2-tuple)
+  d <- rtnbinom(n = K, mu = mu, size = size, trunc = trunc)
+  if (length(p1) == 1L) {
+    p1 <- rep(p1, K)
+  }
+  if (length(p2) == 1L) {
+    p2 <- rep(p2, K)
+  }
+  if (length(or) == 1L) {
+    or <- rep(or, K)
+  }
+  .simTables <- function(k, d, p1, p2, or) {
+    # Compute joint probabilities
+    P <- mipfp::Ipfp(seed = matrix(c(or, 1, 1, 1), ncol = 2),
+                     target.list = list(1, 2),
+                     target.data = list(c(1 - p1, p1), c(1 - p2, p2)))$x.hat
+    matrix(rmultinom(1, d, as.vector(P)), ncol = 2)
+  }
+  mapply(.simTables, k = K, d = d, p1 = p1, p2 = p2, or = or, SIMPLIFY = "array")
+}
+
+# Estimator of the (offset-adjusted) unconditional odds ratios of K 2x2 tables
+OR <- function(x, offset = 0.5) {
+  x <- x + offset
+  MM <- x[2, 2, ]
+  MU <- x[2, 1, ]
+  UM <- x[1, 2, ]
+  UU <- x[1, 1, ]
+  # Compute on the log scale to avoid overflow
+  lor <- log(MM) + log(UU) - log(MU) - log(UM)
+  log_ase2 <- 1 / MM + 1 / MU + 1 / UM + 1 / UU
+  ci <- c(exp(lor - qnorm(0.975) * sqrt(log_ase2)), 
+          exp(lor + qnorm(0.975) * sqrt(log_ase2))) 
+  list(estimate = exp(lor), conf.int = ci)
+}
+
+# TODO: Add variance estimator
+# Mantel-Haenszel estimator of a common log odds ratio of a 2x2xK table
+# Also estimates 95% CI.
+MH <- function(x, offset = 0) {
+  x <- x + offset
+  MM <- x[2, 2, ]
+  MU <- x[2, 1, ]
+  UM <- x[1, 2, ]
+  UU <- x[1, 1, ]
+  d <- apply(x, 3, sum)
+  or <- sum((UU * MM) / d) / sum((MU * UM) / d)
+  # One or more margins must be identically zero so add offset
+  if (is.nan(or) | isTRUE(all.equal(or, 0)) | is.infinite(or)) {
+    warning("One or more cell is (probably) identically zero in all K 2x2 tables. Adding offset = 0.5")
+    MH(x, 0.5)
+  } else {
+    log_ase2 <- sum((UU + MM) * (UU * MM) / (d ^ 2)) / (2 * (sum(UU * MM / d)) ^ 2) +
+      sum(((UU + MM) * (MU * UM) + (UM + MU) * (UU * MM)) / d ^ 2) /
+      (2 * sum(UU * MM / d) * sum(MU * UM / d)) +
+      sum((UM + MU) * (UM * MU) / (d ^ 2)) / (2 * (sum(UM * MU / d)) ^ 2)
+    ci <- c(exp(log(or) - qnorm(0.975) * sqrt(log_ase2)), 
+            exp(log(or) + qnorm(0.975) * sqrt(log_ase2)))
+    list(estimate = or, conf.int = ci)
+  }
+}
+
+# Estimator of the (offset-adjusted) unconditional odds ratio of the
+# 2x2xK collapsed over K.
+ORCollapsed <- function(x, offset = 0.5) {
+  z <- apply(x, c(1, 2), sum)
+  # Artificially augment so it's a 2x2x1 table
+  dim(z) <- c(dim(z), 1)
+  or <- OR(z, 0)
+  if (is.nan(or$estimate) | is.infinite(or$estimate)) {
+    warning("One or more cell is (probably) identically zero in all K 2x2 tables. Adding offset = 0.5")
+    OR(z, 0.5)
+  } else {
+    or
+  }
+}
+
+op <- par()
+par(mfrow = c(3, 3), cex.main = 1.3, cex.lab = 1.2, cex.lab = 1.2)
+```
+
+### Simulation 1
+
+All estimators struggle when marginal probabilities are consistently near the boundaries. MH and common OR are almost equivalent. Raw ORs are bad estimates of the true odds ratio unless marginal probabilities are well away from the boundaries.
+
+```{r}
+# Simulate and plot data when p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 1, i.e., independence
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- 1
+p1 <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1[i], 
+                 p2 = p2[i], or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = ", p1), 
+                     list(p1 = p1[i]))
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 2
+
+Increasing $K$ to $K = 1000$ helps, although CIs are still wider than we might like.
+
+```{r}
+# Simulate and plot data when p1 = p2.
+# 1000 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 1, i.e., independence
+set.seed(666)
+K <- 1000
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- 1
+p1 <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1[i], 
+                 p2 = p2[i], or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = ", p1), 
+                     list(p1 = p1[i]))
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 3
+
+MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
+
+```{r}
+# Simulate and plot data when p1 = U(0, 1), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 2^(-4), 2^(-3), ..., 2^(4).
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- exp(seq(-4, 4, 1))
+p1 <- runif(K)
+p2 <- runif(K)
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or[i])
+  main <- substitute(paste(pi["2+"], ", ", pi["+2"], " = U(0, 1)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or[i]), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 4
+
+MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
+
+```{r}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 2^(-4), 2^(-3), ..., 2^(4).
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or[i])
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or[i]), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 5
+
+MH nails the location but greatly underestimates the variation.
+
+```{r}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio Gaussian distributed with mean =  2^(-4), 2^(-3), ..., 2^(4) and 
+# var = 1.
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  or <- exp(rnorm(K, log(or_mean[i]), 1))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 6
+
+Increasing $K$ to $K = 1000$ only makes the underestimation of variance by the MH estimator worse.
+
+```{r}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio Gaussian distributed with mean =  2^(-4), 2^(-3), ..., 2^(4) and 
+# var = 1.
+set.seed(666)
+K <- 1000
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  or <- exp(rnorm(K, log(or_mean[i]), 1))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 7
+
+MH estimator still gets the location approximately correct but underestimates the variance and can't account for the skewness.
+
+```{r}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio Skew-Gaussian(2^(-4), 2^(-3), ..., 2^(4), 1, -10) 
+library(sn)
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  or <- exp(rsn(K, log(or_mean[i]), 1, -10))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+### Simulation 8
+
+MH assumes symmetry, hence estimates in between the two modes. Obviously the MH variance estimator can't cope either.
+
+```{r}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio from  0.5 * Gaussian(2^(-4), 2^(-3), ..., 2^(4), 1) + 
+# 0.5 * Gaussian(-2^(-4), 2^(-3), ..., 2^(4), 1) mixture.
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  w <- sample(c(-1, 1), K, replace = TRUE)
+  or <- exp(rnorm(K, w * log(or_mean[i]), 1))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
+
+```{r}
+par(op)
+```
+
+## Analysis
+
 ```{r}
 library(MethylationTuples)
 library(BiocParallel)
