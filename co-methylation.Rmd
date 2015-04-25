@@ -144,7 +144,6 @@ OR <- function(x, offset = 0.5) {
   list(estimate = exp(lor), conf.int = ci)
 }
 
-# TODO: Add variance estimator
 # Mantel-Haenszel estimator of a common log odds ratio of a 2x2xK table
 # Also estimates 95% CI.
 MH <- function(x, offset = 0) {
@@ -555,77 +554,1150 @@ title(title, outer = TRUE, line = -1)
 par(op)
 ```
 
-## Analysis
+## Analysis of datasets
 
 ```{r}
-library(MethylationTuples)
 library(BiocParallel)
 BPPARAM <- MulticoreParam(17)
+```
 
-methpat <- readRDS(
-  '../processed_data/Lister/Lister_2_tuples_strand_collapsed.rds')
+### Computations
+
+#### EPISCOPE
+
+```{r}
+# Load data
+dataset <- "EPISCOPE"
+cpg_pairs <- readRDS("cpg_pairs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
 mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
 mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
                               dt = mh_by_ipd, 
-                              sn = colnames(methpat), SIMPLIFY = FALSE))
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
 mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
                                  K = NULL, BPPARAM = BPPARAM)
 mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
                               dt = mh_by_ipd_seqnames, 
-                              sn = colnames(methpat), SIMPLIFY = FALSE))
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
 mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
                                  K = 200, BPPARAM = BPPARAM)
 mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
                               dt = mh_by_ipd_seqnames_200, 
-                              sn = colnames(methpat), SIMPLIFY = FALSE))
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
 
-plot(log(estimate) ~ IPD, data = or_by_ipd_seqnames[sampleName == "ADS", ], 
-     ylim = c(-1, 4), main = "ADS")
-lines(log(CI_lower) ~ IPD, data = or_by_ipd[sampleName == "ADS", ], lwd = 3, 
-      col = 'dodgerBlue')
-lines(log(CI_upper) ~ IPD, data = or_by_ipd[sampleName == "ADS", ], lwd = 3, 
-      col = 'dodgerBlue')
-lines(log(estimate) ~ IPD, data = or_by_ipd[sampleName == "ADS", ], 
-      type = 'l', col = 'orange', lwd = 3)
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
 
-plot(log(estimate) ~ IPD, 
-     data = mh_by_ipd_seqnames_200[sampleName == "ADS" & seqnames == 'chr1', ], 
-     ylim = c(-1, 4), main = "ADS: chr1")
-lines(log(CI_lower) ~ IPD, 
-      data = or_by_ipd_seqnames[sampleName == "ADS" & seqnames == 'chr1', ], 
-      lwd = 3, 
-      col = 'dodgerBlue')
-lines(log(CI_upper) ~ IPD, 
-      data = or_by_ipd_seqnames[sampleName == "ADS" & seqnames == 'chr1', ],
-      lwd = 3, 
-      col = 'dodgerBlue')
-lines(log(estimate) ~ IPD, 
-      data = or_by_ipd_seqnames[sampleName == "ADS" & seqnames == 'chr1', ], 
-      type = 'l', col = 'orange', lwd = 3)
-
-plot(log(estimate) ~ IPD, 
-     data = mh_by_ipd_seqnames_200[sampleName == "ADS" & seqnames == 'chrX', ], 
-     ylim = c(-1, 4), main = "ADS: chrX")
-lines(log(CI_lower) ~ IPD, 
-      data = or_by_ipd_seqnames[sampleName == "ADS" & seqnames == 'chrX', ], 
-      lwd = 3, 
-      col = 'dodgerBlue')
-lines(log(CI_upper) ~ IPD, 
-      data = or_by_ipd_seqnames[sampleName == "ADS" & seqnames == 'chrX', ],
-      lwd = 3, 
-      col = 'dodgerBlue')
-lines(log(estimate) ~ IPD, 
-      data = or_by_ipd_seqnames[sampleName == "ADS" & seqnames == 'chrX', ], 
-      type = 'l', col = 'orange', lwd = 3)
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
 ```
 
-# Within-fragment co-methylation
+#### Lister
+
+```{r}
+# Load data
+dataset <- "Lister"
+cpg_pairs <- readRDS("cpg_pairs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+# Drop chrL which isn't a human seqlevel
+methpat <- dropSeqlevels(methpat, "chrL")
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+#### Seisenberger
+
+```{r}
+# Load data
+dataset <- "Seisenberger"
+cpg_pairs <- readRDS("cpg_pairs_mm10.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+#### Ziller
+
+```{r}
+# Load data
+dataset <- "Ziller_merged"
+cpg_pairs <- readRDS("cpg_pairs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+### Plots
+
+__TODO: Re-write using ggplot and `thesis_theme`__
+
+#### Functions
+
+```{r}
+# TODO: Check transparency (alpha) prints okay.
+# TODO: Perhaps rotate x-tick labels.
+# TODO: Add genome-wide line to legend.
+plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax, 
+                   pair_type, annotate = TRUE, seqlevels = NULL) {
+  
+  # A hack to annotate chromosome as autosome, X, Y or mtDNA
+  uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
+  seqtype <- vector("character", length(uniq_seqnames))
+  autosomes <- grep("[0-9]", uniq_seqnames)
+  seqtype[autosomes] <- "autosome"
+  X <- grep("X", uniq_seqnames)
+  seqtype[X] <- "X"
+  Y <- grep("Y", uniq_seqnames)
+  seqtype[Y] <- "Y"
+  MT <- grep("M", uniq_seqnames)
+  seqtype[MT] <- "MT"
+  names(seqtype) <- uniq_seqnames
+  mh_by_ipd_seqnames[, seqtype := seqtype[seqnames]]
+  
+  if (!is.null(seqlevels)) {
+    mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
+  }
+  
+  g <- ggplot(aes(x = IPD, y = log(estimate)), data = mh_by_ipd_seqnames)
+  
+  if (annotate) {
+    g <- g + geom_point(aes(col = seqtype), alpha = 0.25)
+  } else {
+    g <- g + geom_point(alpha = 0.25)
+  }
+  g <- g + facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) + 
+    xlim(c(0, xmax)) +
+    geom_line(aes(x = IPD, y = log(estimate)), data = mh_by_ipd, 
+              col = 'dodgerBlue', lwd = 1.3) + 
+    thesis_theme +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(psi)) +
+    guides(colour = guide_legend(override.aes = list(alpha = 1)))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+plotMHByCGI <- function(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, 
+                        ncol, xmax, pair_type) {
+  x <- rbind(in_cgi_mh_by_ipd[, CGI:= TRUE], out_cgi_mh_by_ipd[, CGI := FALSE])
+  # TODO: Add Dark2 colours so as to be consistent with cor(beta). Add to legend
+  g <- ggplot(aes(x = IPD, y = log(estimate), col = CGI), data = x) + 
+    geom_line(lwd = 1.3) +
+    scale_color_brewer(palette = "Dark2") +
+    thesis_theme +
+    xlim(c(0, xmax)) +
+    facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(psi))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+```
+
+#### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+nrow <- 3
+ncol <- 4
+```
+
+```{r EPISCOPE_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+__TODO: There's no data from chrM for E18BUF; why?__
+
+```{r EPISCOPE_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r EPISCOPE_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r EPISCOPE_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+#### Lister
+
+```{r}
+dataset <- "Lister"
+nrow <- 4
+ncol <- 5
+```
+
+```{r Lister_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Lister_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Lister_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Lister_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+#### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+nrow <- 1
+ncol <- 3
+```
+
+```{r Seisenberger_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Seisenberger_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Seisenberger_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Seisenberger_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+#### Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+nrow <- 3
+ncol <- 3
+```
+
+```{r Ziller_merged_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+__TODO: Something seems to have gone a little haywire on chr21 of a few of these samples__.
+
+```{r Ziller_merged_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Ziller_merged_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+```{r Ziller_merged_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+```
+
+# Old code: estimating within-fragment co-methylation at individual 2-tuples
+
+__WARNING: This is old code__. 
+
+The code in this section was used when exploring whether it was feasible to estimate within-fragment co-methylation for individual 2-tuples ($2 \times 2$ tables) from whole-genome bisulfite-sequencing experiments. The simulation study above shows that 'best' estimator, the 0.5-adjusted unconditional maximum likelihood estimator, is severely biased for the sort of $2 \times 2$ tables we get from whole-genome bisulfite-sequencing experiments.
+
+## Within-fragment co-methylation
 
 For the $NIL = 0$, I remove all pairs where $NIL > 0$ __according to CpGs in the reference genome__. Technically, this should be done based on sample-specific CpGs, but this is quite a bit more difficult. Moreover, it won't have a huge effect on genome-wide analyses.
 
-## Computations
+### Computations
 
-### EPISCOPE
+#### EPISCOPE
 
 ```{r}
 dataset <- "EPISCOPE"
@@ -692,7 +1764,7 @@ rm(pearson)
 rm(methpat)
 ```
 
-### Lister
+#### Lister
 
 ```{r}
 dataset <- "Lister"
@@ -759,7 +1831,7 @@ rm(pearson)
 rm(methpat)
 ```
 
-### Seisenberger
+#### Seisenberger
 
 ```{r}
 dataset <- "Seisenberger"
@@ -827,7 +1899,7 @@ rm(pearson)
 rm(methpat)
 ```
 
-### Ziller
+#### Ziller
 
 ```{r}
 dataset <- "Ziller"
@@ -896,9 +1968,9 @@ rm(pearson)
 rm(methpat)
 ```
 
-## Plots
+### Plots
 
-### Functions
+#### Functions
 
 ```{r}
 quantileComethPlot <- function(cometh, probs, dataset, min_cov, coef, xmax,
@@ -960,7 +2032,7 @@ quantileComethPlot <- function(cometh, probs, dataset, min_cov, coef, xmax,
   }
 ```
 
-### EPISCOPE
+#### EPISCOPE
 
 ```{r}
 dataset <- "EPISCOPE"
@@ -1080,7 +2152,7 @@ ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov,
 rm(g, cometh)
 ```
 
-### Lister
+#### Lister
 
 ```{r}
 dataset <- "Lister"
@@ -1200,7 +2272,7 @@ ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov,
 rm(g, cometh)
 ```
 
-### Seisenberger
+#### Seisenberger
 
 ```{r}
 dataset <- "Seisenberger"
@@ -1319,7 +2391,7 @@ ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov,
 rm(g, cometh)
 ```
 
-### Ziller
+#### Ziller
 
 ```{r}
 dataset <- "Ziller"
@@ -1439,7 +2511,7 @@ ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov,
 rm(g, cometh)
 ```
 
-## LOR vs Pearson frequency polygons
+### LOR vs Pearson frequency polygons
 
 ```{r}
 set.seed(666)
