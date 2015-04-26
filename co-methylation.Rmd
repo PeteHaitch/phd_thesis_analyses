@@ -364,6 +364,12 @@ title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size,
 title(title, outer = TRUE, line = -1)
 ```
 
+### Beta(0.3, 0.2)
+
+```{r Beta_marginals}
+hist(rbeta(1000, 0.3, 0.2))
+```
+
 ### Simulation 4
 
 MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
@@ -1466,8 +1472,6 @@ rm(methpat, cgi)
 
 ### Plots
 
-__TODO: Re-write using ggplot and `thesis_theme`__
-
 #### Functions
 
 ```{r}
@@ -1479,17 +1483,17 @@ plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax,
   
   # A hack to annotate chromosome as autosome, X, Y or mtDNA
   uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
-  seqtype <- vector("character", length(uniq_seqnames))
+  chromosome <- vector("character", length(uniq_seqnames))
   autosomes <- grep("[0-9]", uniq_seqnames)
-  seqtype[autosomes] <- "autosome"
+  chromosome[autosomes] <- "autosome"
   X <- grep("X", uniq_seqnames)
-  seqtype[X] <- "X"
+  chromosome[X] <- "X"
   Y <- grep("Y", uniq_seqnames)
-  seqtype[Y] <- "Y"
+  chromosome[Y] <- "Y"
   MT <- grep("M", uniq_seqnames)
-  seqtype[MT] <- "MT"
-  names(seqtype) <- uniq_seqnames
-  mh_by_ipd_seqnames[, seqtype := seqtype[seqnames]]
+  chromosome[MT] <- "MT"
+  names(chromosome) <- uniq_seqnames
+  mh_by_ipd_seqnames[, chromosome := chromosome[seqnames]]
   
   if (!is.null(seqlevels)) {
     mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
@@ -1498,7 +1502,7 @@ plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax,
   g <- ggplot(aes(x = IPD, y = log(estimate)), data = mh_by_ipd_seqnames)
   
   if (annotate) {
-    g <- g + geom_point(aes(col = seqtype), alpha = 0.25)
+    g <- g + geom_point(aes(col = chromosome), alpha = 0.25)
   } else {
     g <- g + geom_point(alpha = 0.25)
   }
@@ -1508,7 +1512,7 @@ plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax,
               col = 'dodgerBlue', lwd = 1.3) + 
     thesis_theme +
     geom_hline(aes(yint = 0), linetype = 2) + 
-    ylab(expression(psi)) +
+    ylab(expression(hat(theta))) +
     guides(colour = guide_legend(override.aes = list(alpha = 1)))
   if (pair_type == "all") {
     g <- g +
@@ -1536,7 +1540,7 @@ plotMHByCGI <- function(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow,
     xlim(c(0, xmax)) +
     facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) +
     geom_hline(aes(yint = 0), linetype = 2) + 
-    ylab(expression(psi))
+    ylab(expression(hat(theta)))
   if (pair_type == "all") {
     g <- g +
       ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
@@ -1566,7 +1570,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 __TODO: There's no data from chrM for E18BUF; why?__
@@ -1576,7 +1580,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r EPISCOPE_MH_by_CGI}
@@ -1585,7 +1589,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
             "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r EPISCOPE_ac_MH_by_CGI}
@@ -1595,7 +1599,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
             "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 #### Lister
@@ -1611,7 +1615,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Lister_ac_MH_by_seqnames}
@@ -1619,7 +1623,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Lister_MH_by_CGI}
@@ -1628,7 +1632,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
             "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Lister_ac_MH_by_CGI}
@@ -1638,7 +1642,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
             "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 #### Seisenberger
@@ -1654,7 +1658,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Seisenberger_ac_MH_by_seqnames}
@@ -1662,7 +1666,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Seisenberger_MH_by_CGI}
@@ -1671,7 +1675,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
             "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Seisenberger_ac_MH_by_CGI}
@@ -1681,7 +1685,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
             "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 #### Ziller
@@ -1697,7 +1701,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 __TODO: Something seems to have gone a little haywire on chr21 of a few of these samples__.
@@ -1707,7 +1711,7 @@ mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Ziller_merged_MH_by_CGI}
@@ -1716,7 +1720,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
             "adjacent") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Ziller_merged_ac_MH_by_CGI}
@@ -1726,7 +1730,7 @@ out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
 plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
             "all") +
   ylim(-2.5, 7.5) + 
-  ylab(bquote(atop(psi, "Truncated [-2.5, 7.5]")))
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 # Old code: estimating within-fragment co-methylation at individual 2-tuples
