@@ -192,7 +192,7 @@ par(mfrow = c(3, 3), cex.main = 1.3, cex.lab = 1.2, cex.lab = 1.2)
 
 All estimators struggle when marginal probabilities are consistently near the boundaries. MH and common OR are almost equivalent. Raw ORs are bad estimates of the true odds ratio unless marginal probabilities are well away from the boundaries.
 
-```{r}
+```{r Simulation_1}
 # Simulate and plot data when p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio = 1, i.e., independence
@@ -236,7 +236,7 @@ title(title, outer = TRUE, line = -1)
 
 Increasing $K$ to $K = 1000$ helps, although CIs are still wider than we might like.
 
-```{r}
+```{r Simulation_2}
 # Simulate and plot data when p1 = p2.
 # 1000 CpG pairs, 30x average coverage truncated at 10
 # odds ratio = 1, i.e., independence
@@ -276,11 +276,55 @@ title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size,
 title(title, outer = TRUE, line = -1)
 ```
 
+### Simulation 2d
+
+Increasing the average sequencing depth to $10000 \times$ removes the skewness of $OR$ but cannot eliminate the variation when the marginal probabilities are near the boundaries.
+
+```{r Simulation_2d}
+# Simulate and plot data when p1 = p2.
+# 1000 CpG pairs, 10000x average coverage truncated at 10
+# odds ratio = 1, i.e., independence
+set.seed(666)
+K <- 1000
+mu <- 10000
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- 1
+p1 <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1[i], 
+                 p2 = p2[i], or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = ", p1), 
+                     list(p1 = p1[i]))
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(hat(theta)),
+       freq = FALSE)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1)
+```
+
 ### Simulation 3
 
 MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
 
-```{r}
+```{r Simulation_3}
 # Simulate and plot data when p1 = U(0, 1), p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio = 2^(-4), 2^(-3), ..., 2^(4).
@@ -324,7 +368,7 @@ title(title, outer = TRUE, line = -1)
 
 MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
 
-```{r}
+```{r Simulation_4}
 # Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio = 2^(-4), 2^(-3), ..., 2^(4).
@@ -368,7 +412,7 @@ title(title, outer = TRUE, line = -1)
 
 MH nails the location but greatly underestimates the variation.
 
-```{r}
+```{r Simulation_5}
 # Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio Gaussian distributed with mean =  2^(-4), 2^(-3), ..., 2^(4) and 
@@ -414,7 +458,7 @@ title(title, outer = TRUE, line = -1)
 
 Increasing $K$ to $K = 1000$ only makes the underestimation of variance by the MH estimator worse.
 
-```{r}
+```{r Simulation_6}
 # Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio Gaussian distributed with mean =  2^(-4), 2^(-3), ..., 2^(4) and 
@@ -460,7 +504,7 @@ title(title, outer = TRUE, line = -1)
 
 MH estimator still gets the location approximately correct but underestimates the variance and can't account for the skewness.
 
-```{r}
+```{r Simulation_7}
 # Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio Skew-Gaussian(2^(-4), 2^(-3), ..., 2^(4), 1, -10) 
@@ -506,7 +550,7 @@ title(title, outer = TRUE, line = -1)
 
 MH assumes symmetry, hence estimates in between the two modes. Obviously the MH variance estimator can't cope either.
 
-```{r}
+```{r Simulation_8}
 # Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
 # 100 CpG pairs, 30x average coverage truncated at 10
 # odds ratio from  0.5 * Gaussian(2^(-4), 2^(-3), ..., 2^(4), 1) + 
