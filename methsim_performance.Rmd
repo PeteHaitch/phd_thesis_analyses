@@ -1,0 +1,54 @@
+---
+title: "methsim performance"
+author: "Peter Hickey"
+date: "4/6/2015"
+output:
+  html_document:
+    keep_md: yes
+---
+
+An example of running times and memory usage for the simulation of a $30\times$ 
+whole-genome bisulfite-sequencing sample.
+
+```{r}
+suppressPackageStartupMessages(library(methsim))
+suppressPackageStartupMessages(library(BiocParallel))
+suppressPackageStartupMessages(library(pryr))
+# Use up to 8 cores in parallel computations.
+BPPARAM <- MulticoreParam(workers = 8L)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+```{r}
+# Set seed for reproducibility.
+set.seed(666)
+
+# ADS: the SimulateMethylomeParam object.
+pryr::object_size(ADS)
+
+# sm: the SimulatedMethylome object
+system.time(sm <- simulate(ADS, BPPARAM = BPPARAM))
+pryr::object_size(sm)
+
+# sbsp: the SimulatedBSParam object.
+# NOTE: Basically all the memory used by the SimulatedBSParam object is the 
+# SimulatedMethylome object.
+sbsp <- SimulateBSParam(SimulatedMethylome = sm, 
+                        aveCov = 30, 
+                        errorRate = 0.01, 
+                        target = NULL)
+pryr::object_size(sbsp)
+
+# sbs: the SimulatedBS object.
+system.time(sbs <- simulate(sbsp, BPPARAM = BPPARAM))
+pryr::object_size(sbs)
+
+# methpat: the MethylationTuples::MethPat object of one-tuples.
+# NOTE: information is lost when a SimulatedBS object is coerced to a MethPat 
+# object. 
+system.time(methpat <- asMethPat(sbs, 
+                                 sampleName = "sim_ADS", 
+                                 size = 1L, 
+                                 BPPARAM = BPPARAM))
+pryr::object_size(methpat)
+```

@@ -1,0 +1,404 @@
+---
+title: "Creating `SimulateMethylomeParam` objects"
+author: "Peter Hickey"
+date: "Modified: 26 April 2015. Compiled: `r format(Sys.Date(), '%d %b %Y')`"
+output: html_document
+---
+
+# Preliminaries
+
+```{r}
+library(methsim)
+library(devtools)
+library(BiocParallel)
+BPPARAM <- MulticoreParam(workers = 8L)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+The code in this document was experimental work that resulted in changes to `methsim`. Consequently, much of it will not work with current versions of `methsim`.
+
+# Explore median standard deviations of $LOR$ distributions
+
+```{r}
+cometh_dt <- rbindlist(
+  lapply(c("EPISCOPE", "Lister", "Seisenberger", "Ziller_merged"), 
+         function(dataset) {
+           x <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                               "_lor_by_pm_region.rds"))
+           x[, dataset := rep(dataset, nrow(x))]
+           x
+           }))
+
+setkey(cometh_dt, dataset, sample, type, IPD)
+x <- cometh_dt[, list(sd = sd(rep(statistic, N), na.rm = TRUE)), 
+               by = key(cometh_dt)][, median(sd, na.rm = TRUE), 
+                                    key = list(dataset, sample, type)]
+y <- dcast.data.table(x, dataset + sample ~ type)
+y
+saveRDS(as.data.frame(y), "rds/median_sd_LOR_distributions.rds")
+```
+
+## Helper functions
+
+A function to create a `SimulatedMethylomeParam` object from the relevant `.rds` files for a particular sample. __WARNING:__ This function is fragile because it assumes the `.rds` files are in specific locations.
+
+```{r}
+makeSMPFromRDS <- function(sample_name, 
+                           dataset = c("EPISCOPE", "Lister", "Seisenberger", 
+                                       "Ziller_merged")) {
+  dataset <- match.arg(dataset)
+  if (dataset %in% c("EPISCOPE", "Ziller_merged")) {
+    BSgenomeName <- "BSgenome.Hsapiens.UCSC.hg19"
+    } else if (dataset == "Lister") {
+      BSgenomeName <- "BSgenome.Hsapiens.UCSC.hg18"
+    } else if (dataset == "Seisenberger") {
+      BSgenomeName <- "BSgenome.Mmusculus.UCSC.mm10"
+    } else {
+      stop("'dataset' not found.")
+    }
+  
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                         "_pm.rds"))
+  meth_level <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset,  
+                               "_beta_by_pm_region.rds"))
+  cometh <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                           "_lor_by_pm_region.rds"))
+  pattern_freqs <- readRDS(paste0("rds/", dataset, 
+                                  "/pattern_freqs_by_pm_region/", dataset, 
+                                  "_pattern_freqs_by_pm_region.rds"))
+  
+  meth_level <- meth_level[sample == sample_name, ][, sample := NULL]
+  cometh <- cometh[sample == sample_name, ][, sample := NULL]
+  pattern_freqs <- pattern_freqs[sample == sample_name][, sample := NULL]
+  SimulateMethylomeParam(BSgenomeName = BSgenomeName, 
+                         PartitionedMethylome = l_pm[[sample_name]],
+                         MethLevelDT = meth_level,
+                         ComethDT = cometh,
+                         PatternFreqsDT = pattern_freqs,
+                         SampleName = sample_name)
+  }
+```
+
+# Summary measures of simulated data
+
+Demonstrate that simulated data have similar $\beta$-value distributions, within-fragment co-methylation distributions and correlations of $\beta$-values to the real data.
+
+## Create `SimulateMethylomeParam` objects
+
+```{r}
+smp_episcope <- bplapply(c("E13BUF", "E13SA", "E13VA", "E13VAT", 
+                       "E18BUF", "E18SA", "E18VA", "E18VAT",
+                       "E23BUF", "E23SA", "E23VA", "E23VAT"),
+                   makeSMPFromRDS, dataset = "EPISCOPE", BPPARAM = BPPARAM)
+smp_lister <- bplapply(c("ADS", "ADS-adipose", "ADS-iPSC", "FF", 
+                         "FF-iPSC_19.11", "FF-iPSC_19.11+BMP4", "FF-iPSC_19.7", 
+                         "FF-iPSC_6.9", "H1+BMP4", "H1_r1", "H1_r2", "H9", 
+                         "H9_Laurent", "HSF1", "IMR90-iPSC", "IMR90_r1", 
+                         "IMR90_r2"),
+                   makeSMPFromRDS, dataset = "Lister", BPPARAM = BPPARAM)
+smp_seisenberger <- bplapply(c("E6.5_epiblast_1", "J1_1"),
+                             makeSMPFromRDS, dataset = "Seisenberger", 
+                             BPPARAM = BPPARAM)
+smp_ziller <- bplapply(c("Colon_Primary_Normal", "Colon_Tumor_Primary",
+                         "Frontal_cortex_AD_1", "Frontal_cortex_AD_2", 
+                         "Frontal_cortex_normal_1", "Frontal_cortex_normal_2", 
+                         "IMR90_cell_line"),
+                       makeSMPFromRDS, dataset = "Ziller", BPPARAM = BPPARAM)
+```
+
+## Create `SimulatedMethylome` objects
+
+```{r}
+set.seed(1066)
+sm_episcope <- lapply(smp_episcope, simulate, BPPARAM = BPPARAM)
+sm_lister <- lapply(smp_lister, simulate, BPPARAM = BPPARAM)
+# Need to update seqlevelsStyle of sm_seisenberger elements to UCSC-style so 
+# that it matches the style of the BSgenome object.
+smp_seisenberger <- lapply(smp_seisenberger, function(smp) {
+  seqlevelsStyle(smp@PartitionedMethylome) <-  "UCSC"
+  smp
+})
+sm_seisenberger <- lapply(smp_seisenberger, simulate, BPPARAM = BPPARAM)
+sm_ziller <- lapply(smp_ziller, simulate, BPPARAM = BPPARAM)
+saveRDS(sm_episcope, "tmp_sm_episcope.rds")
+saveRDS(sm_lister, "tmp_sm_lister.rds")
+saveRDS(sm_seisenberger, "tmp_sm_seisenberger.rds")
+saveRDS(sm_ziller, "tmp_sm_ziller.rds")
+```
+
+## Create `SimulateBSParam` objects
+
+```{r}
+# UP TO HERE
+```
+
+## Create `SimulatedBS` objects
+
+```{r}
+# TODO
+```
+
+# Models of within-fragment co-methylation
+
+I explore different models of within-fragment co-methylation using the _ADS_ sample from the _Lister_ dataset (the _ADS_ `SimualteMethylomeParam` object is included in the `methsim` package).
+
+The different models are:
+
+1. Sample from $LOR_{(i, i + 1) | r_{i}}$ if there are at least $100$ observations, otherwise sample from Normal(0, 2) distribution.
+2. Sample from $LOR_{(i, i + 1) | r_{i}}$ if there are at least $100$ observations, otherwise uniformly 0.
+3. Uniformly 0, i.e., independence of $Z_{i}$ and $Z_{i + 1}$ for all $i$.
+
+In each case I simulate 200 bp single-end reads (this is to mimic 100 bp paired-end reads).
+
+## Model 1
+
+```{r}
+# Set seed for reproducibility
+set.seed(666)
+sm_1 <- simulate(ADS, BPPARAM = BPPARAM)
+sbsp_1 <- SimulateBSParam(SimulatedMethylome = sm_1, 
+                          aveCov = 30, 
+                          errorRate = 0.01)
+set.seed(1999)
+sbs_1 <- simulate(sbsp_1, BPPARAM = BPPARAM, readLength = 200L)
+one_tuples_1 <- asMethPat(sbs_1, size = 1L, sampleName = "model_1", BPPARAM = BPPARAM)
+two_tuples_1 <- asMethPat(sbs_1, size = 2L, sampleName = "model_1", BPPARAM = BPPARAM)
+```
+
+
+## Model 2
+
+```{r}
+# Set seed for reproducibility
+set.seed(666)
+sm_2 <- simulate(ADS, 
+                 mean_fun = function(ipd, type) 0, 
+                 sd_fun = function(ipd, type) 0,
+                 BPPARAM = BPPARAM)
+sbsp_2 <- SimulateBSParam(SimulatedMethylome = sm_2, 
+                          aveCov = 30, 
+                          errorRate = 0.01)
+set.seed(1999)
+sbs_2 <- simulate(sbsp_2, BPPARAM = BPPARAM, readLength = 200L)
+one_tuples_2 <- asMethPat(sbs_2, size = 1L, sampleName = "model_2", BPPARAM = BPPARAM)
+two_tuples_2 <- asMethPat(sbs_2, size = 2L, sampleName = "model_2", BPPARAM = BPPARAM)
+```
+
+## Model 3
+
+```{r}
+# Set seed for reproducibility
+set.seed(666)
+sm_3 <- simulate(ADS, 
+                 mean_fun = function(ipd, type) 0, 
+                 sd_fun = function(ipd, type) 0,
+                 BPPARAM = BPPARAM,
+                 min_n = Inf)
+sbsp_3 <- SimulateBSParam(SimulatedMethylome = sm_3, 
+                          aveCov = 30, 
+                          errorRate = 0.01)
+set.seed(1999)
+sbs_3 <- simulate(sbsp_3, BPPARAM = BPPARAM, readLength = 200L)
+one_tuples_3 <- asMethPat(sbs_3, size = 1L, sampleName = "model_3", BPPARAM = BPPARAM)
+two_tuples_3 <- asMethPat(sbs_3, size = 2L, sampleName = "model_3", BPPARAM = BPPARAM)
+```
+
+## Analysis
+
+First, combine the data from the three models into a single one-tuples object 
+and a single two-tuples object.
+
+```{r}
+# Can cbind() because all SimulatedBS objects were created using the same seed. 
+# Therefore, the one_tuples (resp. two_tuples) contain the exact same 1-tuples 
+# (resp. 2-tuples).
+one_tuples <- cbind(one_tuples_1, one_tuples_2, one_tuples_3)
+dir.create("rds/Simulation/one_tuples", recursive = TRUE)
+saveRDS(one_tuples, "rds/Simulation/one_tuples/one_tuples.rds")
+two_tuples <- cbind(two_tuples_1, two_tuples_2, two_tuples_3)
+dir.create("rds/Simulation/two_tuples", recursive = TRUE)
+saveRDS(one_tuples, "rds/Simulation/two_tuples/two_tuples.rds")
+```
+
+Interestingly, there appears to be within-fragment co-methylation for Model 3! However, this is really an artefact driven by low sequencing coverage, particularly when combined with extreme marginal probabilities. For example, when $B_{i}$ is close to zero or one then we need a large $n$ (reads per 2-tuple) before the $LOR$ estimator converges to its true value of zero. The following code snippet demonstrates this:
+
+```{r}
+# f() simulates Z1, Z2 ~ binomial(n, p) such that Z1 and Z2 are completely 
+# independent of another. It then computes LOR for the 2x2 table formed by 
+# cross-tabulating Z1 and Z2. The theoretical log odds-ratio is zero.
+f <- function(n = 1000, p = 0.5) {
+  x <- data.frame(Z1 = factor(rbinom(n, 1, p), levels = c(0, 1)),
+                  Z2 = factor(rbinom(n, 1, p), levels = c(0, 1)))
+  y <- xtabs(data = x, drop.unused.levels = FALSE)
+  
+  lor <- log2(y[1, 1] + 0.5) + 
+    log2(y[2, 2] + 0.5) - 
+    log2(y[1, 2] + 0.5) - 
+    log2(y[2, 1] + 0.5)
+  
+  lor
+}
+
+# n = 10 (the cutoff I use for co-methylation plots in my thesis)
+par(mfrow = c(3, 3))
+for (p in c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)) {
+  LOR <- replicate(1000, f(n = 10, p = p))
+  # summary(LOR)
+  hist(LOR, xlim = c(-10, 10), sub = paste0("p = ", p), freq = FALSE, breaks = seq(-10, 10, 0.5))
+  abline(v = 0, col = "red", lty = 2)
+  }
+
+# As above, but with n = 10000
+par(mfrow = c(3, 3))
+for (p in c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)) {
+  LOR <- replicate(1000, f(n = 10000, p = p))
+  # summary(LOR)
+  hist(LOR, xlim = c(-10, 10), sub = paste0("p = ", p), freq = FALSE, breaks = seq(-10, 10, 0.5))
+  abline(v = 0, col = "red", lty = 2)
+  }
+```
+
+Basically, the $LOR$ estimator is bad when $n$ is small and $B$ is nearer the boundary. And $n$ is small for most 2-tuples. Therefore, we should be doing some sort of shrinking of these estimates, e.g., using Matthew Stephen's adaptive shrinkage ([`ashr`](https://github.com/stephens999/ashr)).
+
+To demonstrate this same phenomenon using `methsim`, I simulate reads for chromosome 22 of Model 1 and Model 3 at $10000\times$ coverage and compare these to the results for $30\times$ coverage.
+
+## Model 1, chromosome 22 at $10000\times$ coverage
+
+__DEPRECATED__
+
+__ERROR: This will crash because it requires too much memory (specifically, `chr22_sbs_1`). Also, it is incorrect - what I really want is a large number of 'true' hapltoypes, not a large sample of a small number of pseudo-haplotypes.__
+
+```{r}
+chr22_sm_1 <- sm_1[seqnames(sm_1) == "chr22", ]
+chr22_sbsp_1 <- SimulateBSParam(SimulatedMethylome = chr22_sm_1,
+                                aveCov = 10000,
+                                errorRate = 0.01)
+set.seed(1999)
+chr22_sbs_1 <- simulate(chr22_sbsp_1, BPPARAM = BPPARAM, readLength = 200L)
+chr22_one_tuples_1 <- asMethPat(chr22_sbs_1, size = 1L, 
+                                sampleName = "chr22_model_1", BPPARAM = BPPARAM)
+chr22_two_tuples_1 <- asMethPat(sbs_1, size = 2L, sampleName = "chr22_model_1", BPPARAM = BPPARAM)
+```
+
+## Model 3, chromosome 22 at $10000\times$ coverage
+
+__DEPRECATED__
+
+__ERROR: This will crash because it requires too much memory (specifically, `chr22_sbs_1`). Also, it is incorrect - what I really want is a large number of pseudo-haplotypes, not a large sample of a small number of pseudo-haplotypes.__
+
+## Model 1, with a large number of pseudo-haplotypes
+
+Simulate $n = 1000$ pseudo-haplotypes for chr22 using Model 1. Then, sample it with $100\times$ sequencing coverage.
+
+```{r}
+BPPARAM <- MulticoreParam(workers = 40L)
+set.seed(666)
+chr22_ADS <- ADS
+n <- 1000
+pfdt <- as.data.table(replicate(n, rep(1 / n, 4)))
+pfdt <- cbind(data.table(type = c("UMR", "LMR", "PMR", "other")), 
+              setNames(pfdt, paste0("w", seq_len(n))),
+              data.table(N = rep(1, 4)))
+chr22_ADS@PatternFreqsDT <- pfdt
+chr22_sm_1 <- simulate(chr22_ADS, BPPARAM = BPPARAM, seqlevels = "chr22")
+chr22_sbsp_1 <- SimulateBSParam(SimulatedMethylome = chr22_sm_1, 
+                                aveCov = 100, 
+                                errorRate = 0.01)
+set.seed(1999)
+chr22_sbs_1 <- simulate(chr22_sbsp_1, BPPARAM = BPPARAM, readLength = 200L)
+one_tuples_1 <- asMethPat(sbs_1, size = 1L, sampleName = "model_1", BPPARAM = BPPARAM)
+two_tuples_1 <- asMethPat(sbs_1, size = 2L, sampleName = "model_1", BPPARAM = BPPARAM)
+```
+
+## Model 1, with `simulate2()`
+
+Use the (experimental) new simulation methodology of `simulate2()`, which returns a `SimulateMethylome2` object.
+
+```{r}
+set.seed(666)
+# simulate2,SimulateMethylomeParam-method doesn't run in parallel.
+model_1_sm2 <- simulate2(ADS)
+model_1_sbsp2 <- SimulateBSParam2(model_1_sm2, 
+                                  aveCov = 30, 
+                                  errorRate = 0.01)
+model_1_sbs2 <- simulate2(model_1_sbsp2, BPPARAM = BPPARAM)
+one_tuples_model_1_sbs2 <- asMethPat(model_1_sbs2, "ADS", size = 1L, BPPARAM = BPPARAM)
+two_tuples_model_1_sbs2 <- asMethPat(model_1_sbs2, "ADS", size = 2L, BPPARAM = BPPARAM)
+
+# As above, but with perturbed marginalProb
+model_1_sbsp2_perturbed <- model_1_sbsp2
+colnames(model_1_sbsp2_perturbed@SimulatedMethylome2) <- "ADS_perturbed"
+assays <- assays(model_1_sbsp2_perturbed@SimulatedMethylome2, 
+                 withDimnames = TRUE)
+epsilon <- 0.01
+mp <- assays[["marginalProb"]]
+mp <- matrix(pmin(1 - epsilon,
+                  pmax(rnorm(nrow(mp), mp, mp * (1 - mp)), epsilon)),
+             ncol = 1,
+             dimnames = list(NULL, "ADS_perturbed"))
+assays[["marginalProb"]] <- mp
+assays(model_1_sbsp2_perturbed@SimulatedMethylome2) <- assays
+model_1_sbs2_perturbed <- simulate2(model_1_sbsp2_perturbed, BPPARAM = BPPARAM)
+one_tuples_model_1_sbs2_perturbed <- asMethPat(model_1_sbs2_perturbed, 
+                                               "ADS_perturbed", size = 1L, BPPARAM = BPPARAM)
+two_tuples_model_1_sbs2_perturbed <- asMethPat(model_1_sbs2_perturbed,
+                                               "ADS_perturbed", size = 2L, BPPARAM = BPPARAM)
+
+# All LOR = 0
+model_1_sbsp2_lor0 <- model_1_sbsp2
+colnames(model_1_sbsp2_lor0@SimulatedMethylome2) <- "ADS_lor0"
+assays <- assays(model_1_sbsp2_lor0@SimulatedMethylome2, 
+                 withDimnames = TRUE)
+lor <- assays[["LOR"]]
+lor <- matrix(0, nrow = nrow(lor), ncol = 1, dimnames = list(NULL, "ADS_lor0"))
+assays[["LOR"]] <- lor
+assays(model_1_sbsp2_lor0@SimulatedMethylome2) <- assays
+model_1_sbs2_lor0 <- simulate2(model_1_sbsp2_lor0, BPPARAM = BPPARAM)
+one_tuples_model_1_sbs2_lor0 <- asMethPat(model_1_sbs2_lor0, 
+                                          "ADS_lor0", size = 1L, BPPARAM = BPPARAM)
+two_tuples_model_1_sbs2_lor0 <- asMethPat(model_1_sbs2_lor0,
+                                          "ADS_lor0", size = 2L, BPPARAM = BPPARAM)
+
+# All LOR = 0, but with perturbed marginalProb
+model_1_sbsp2_lor0_perturbed <- model_1_sbsp2
+colnames(model_1_sbsp2_lor0_perturbed@SimulatedMethylome2) <- "ADS_lor0_perturbed"
+assays <- assays(model_1_sbsp2_lor0_perturbed@SimulatedMethylome2, 
+                 withDimnames = TRUE)
+epsilon <- 0.01
+lor <- assays[["LOR"]]
+lor <- matrix(0, nrow = nrow(lor), ncol = 1, 
+              dimnames = list(NULL, "ADS_lor0_perturbed"))
+assays[["LOR"]] <- lor
+mp <- assays[["marginalProb"]]
+mp <- matrix(pmin(1 - epsilon,
+                  pmax(rnorm(nrow(mp), mp, mp * (1 - mp)), epsilon)),
+             ncol = 1,
+             dimnames = list(NULL, "ADS_lor0_perturbed"))
+assays[["marginalProb"]] <- mp
+assays(model_1_sbsp2_lor0_perturbed@SimulatedMethylome2) <- assays
+model_1_sbs2_lor0_perturbed <- simulate2(model_1_sbsp2_lor0_perturbed,
+                                         BPPARAM = BPPARAM)
+one_tuples_model_1_sbs2_lor0_perturbed <- asMethPat(model_1_sbs2_lor0_perturbed, 
+                                                    "ADS_lor0_perturbed", 
+                                                    size = 1L, BPPARAM = BPPARAM)
+two_tuples_model_1_sbs2_lor0_perturbed <- asMethPat(model_1_sbs2_lor0_perturbed,
+                                                    "ADS_lor0_perturbed", 
+                                                    size = 2L, BPPARAM = BPPARAM)
+
+# marginalProb sampled from MethLevelDT
+# TODO
+# NOTE: This will make adding DMRs more difficult since the average 
+# level of methylation across a region is less controlled.
+
+```
+
+# The choice of $\mathbf{W}$
+
+# Simulating differential methylation
+
+
+# Session info
+
+```{r}
+devtools::session_info()
+```

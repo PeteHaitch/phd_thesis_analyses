@@ -182,6 +182,12 @@ bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
 l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
   partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
   }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Hsapiens.UCSC.hg19))
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
@@ -357,6 +363,12 @@ bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
 l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
   partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
   }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Hsapiens.UCSC.hg18))
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
@@ -526,6 +538,13 @@ bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
 l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
   partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
   }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqlevelsStyle(seqinfo) <- "NCBI"
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Mmusculus.UCSC.mm10))
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
@@ -691,6 +710,12 @@ bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
 l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
   partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
   }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Hsapiens.UCSC.hg19))
 partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
 dir.create(partioned_methylome_rds_dir, recursive = TRUE)
 saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
