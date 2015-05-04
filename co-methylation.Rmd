@@ -366,7 +366,7 @@ title(title, outer = TRUE, line = -1)
 
 ### Beta(0.3, 0.2)
 
-```{r Beta_marginals}
+```{r beta_marginals}
 hist(rbeta(1000, 0.3, 0.2))
 ```
 
@@ -1472,12 +1472,12 @@ rm(methpat, cgi)
 
 ### Plots
 
+We plot genome-level and chromosome-level estimates of $\widehat{\theta}_{MH}$. We see some autosomal $\widehat{\theta}_{MH}$ that are separated from the majority of autosomal estimates. Some detective work revealed that these seem to occur on chromosome 21. At this point I have no idea what is causing this signal, but I document it for interests sake.
+
 #### Functions
 
 ```{r}
-# TODO: Check transparency (alpha) prints okay.
 # TODO: Perhaps rotate x-tick labels.
-# TODO: Add genome-wide line to legend.
 plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax, 
                    pair_type, annotate = TRUE, seqlevels = NULL) {
   
@@ -1485,15 +1485,16 @@ plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax,
   uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
   chromosome <- vector("character", length(uniq_seqnames))
   autosomes <- grep("[0-9]", uniq_seqnames)
-  chromosome[autosomes] <- "autosome"
+  chromosome[autosomes] <- "autosomes"
   X <- grep("X", uniq_seqnames)
-  chromosome[X] <- "X"
+  chromosome[X] <- "chrX"
   Y <- grep("Y", uniq_seqnames)
-  chromosome[Y] <- "Y"
+  chromosome[Y] <- "chrY"
   MT <- grep("M", uniq_seqnames)
-  chromosome[MT] <- "MT"
+  chromosome[MT] <- "chrMT"
   names(chromosome) <- uniq_seqnames
   mh_by_ipd_seqnames[, chromosome := chromosome[seqnames]]
+  mh_by_ipd[, chromosome := "genome"]
   
   if (!is.null(seqlevels)) {
     mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
@@ -1502,18 +1503,26 @@ plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax,
   g <- ggplot(aes(x = IPD, y = log(estimate)), data = mh_by_ipd_seqnames)
   
   if (annotate) {
-    g <- g + geom_point(aes(col = chromosome), alpha = 0.25)
+    g <- g + geom_point(aes(col = chromosome), alpha = 0.5)
   } else {
-    g <- g + geom_point(alpha = 0.25)
+    g <- g + geom_point(alpha = 0.5)
   }
   g <- g + facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) + 
     xlim(c(0, xmax)) +
-    geom_line(aes(x = IPD, y = log(estimate)), data = mh_by_ipd, 
-              col = 'dodgerBlue', lwd = 1.3) + 
+    geom_line(aes(x = IPD, y = log(estimate), col = chromosome), 
+              data = mh_by_ipd, 
+              lwd = 1.3) + 
     thesis_theme +
     geom_hline(aes(yint = 0), linetype = 2) + 
     ylab(expression(hat(theta))) +
-    guides(colour = guide_legend(override.aes = list(alpha = 1)))
+    scale_colour_brewer(palette = "Paired") +
+    guides(colour = guide_legend(title = "Estimate level",
+                                 override.aes = list(alpha = rep(1, 5),
+                                                     shape = c(rep(16, 4), NA),
+                                                     size = rep(3, 5),
+                                                     linetype = c(rep(0, 4), 1)
+                                                     ))) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
   if (pair_type == "all") {
     g <- g +
       ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
@@ -1540,7 +1549,77 @@ plotMHByCGI <- function(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow,
     xlim(c(0, xmax)) +
     facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) +
     geom_hline(aes(yint = 0), linetype = 2) + 
-    ylab(expression(hat(theta)))
+    ylab(expression(hat(theta))) + 
+    guides(colour = guide_legend(title = "CpG island"))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+plotMHchr21 <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 
+                        xmax, pair_type, annotate = TRUE, seqlevels = NULL) {
+  
+  # A hack to annotate chromosome as autosome, X, Y or mtDNA
+  uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
+  chromosome <- vector("character", length(uniq_seqnames))
+  autosomes <- grep("[0-9]", uniq_seqnames)
+  chromosome[autosomes] <- "autosomes (excl. chr21)"
+  X <- grep("X", uniq_seqnames)
+  chromosome[X] <- "chrX"
+  Y <- grep("Y", uniq_seqnames)
+  chromosome[Y] <- "chrY"
+  MT <- grep("M", uniq_seqnames)
+  chromosome[MT] <- "chrMT"
+  chr21 <- grep("chr21", uniq_seqnames)
+  chromosome[chr21] <- "chr21"
+  names(chromosome) <- uniq_seqnames
+  mh_by_ipd_seqnames[, chromosome := chromosome[seqnames]]
+  mh_by_ipd[, chromosome := "genome"]
+  
+  if (!is.null(seqlevels)) {
+    mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
+  }
+  
+  g <- ggplot(aes(x = IPD, y = log(estimate)), 
+              data = mh_by_ipd_seqnames)
+  
+  if (annotate) {
+    g <- g + geom_point(aes(col = chromosome), alpha = 0.5)
+  } else {
+    g <- g + geom_point(alpha = 0.5)
+  }
+  g <- g + facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) + 
+    xlim(c(0, xmax)) +
+    geom_line(aes(x = IPD, y = log(estimate), col = chromosome), 
+              data = mh_by_ipd, 
+              lwd = 1.3) + 
+    geom_line(aes(x = IPD, y = log(estimate), col = chromosome), 
+              data = mh_by_ipd_seqnames[seqnames == "chr21", ],
+              lwd = 1.3) +
+    thesis_theme +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(hat(theta))) +
+    scale_colour_manual(values = c("#A6CEE3", "black", "#1F78B4", "#B2DF8A", 
+                                   "#33A02C", "#FB9A99")) +
+    guides(colour = 
+             guide_legend(title = "Estimate level",
+                          override.aes = list(alpha = rep(1, 6),
+                                              shape = c(16, NA, 16, 16, 16, NA),
+                                                     size = rep(3, 6),
+                                                     linetype = c(0, 1, 0, 0, 
+                                                                  0, 1)
+                                                     ))) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
   if (pair_type == "all") {
     g <- g +
       ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
@@ -1573,12 +1652,13 @@ plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
-__TODO: There's no data from chrM for E18BUF; why?__
-
 ```{r EPISCOPE_ac_MH_by_seqnames}
 mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
@@ -1624,6 +1704,9 @@ mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
 ```{r Lister_MH_by_CGI}
@@ -1667,6 +1750,7 @@ mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+# Seisenberger is mouse data, hence no chr21
 ```
 
 ```{r Seisenberger_MH_by_CGI}
@@ -1704,12 +1788,13 @@ plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
-__TODO: Something seems to have gone a little haywire on chr21 of a few of these samples__.
-
 ```{r Ziller_merged_ac_MH_by_seqnames}
 mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
