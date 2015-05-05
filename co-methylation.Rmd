@@ -1813,7 +1813,8 @@ ncol <- 3
 ```{r Ziller_merged_MH_by_seqnames}
 mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
 mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
-plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, gsub("_merged", "", dataset), nrow, ncol, 
+       350, "adjacent") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
@@ -1824,7 +1825,8 @@ mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
 plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
-plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, gsub("_merged", "", dataset), nrow, 
+            ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
@@ -1832,8 +1834,8 @@ plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
 ```{r Ziller_merged_MH_by_CGI}
 in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
 out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
-plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
-            "adjacent") +
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, gsub("_merged", "", dataset), 
+            nrow, ncol, 350, "adjacent") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
@@ -1842,8 +1844,8 @@ plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
 in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
                                    "_ac_in_cgi_mh_by_ipd.rds"))
 out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
-plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
-            "all") +
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, gsub("_merged", "", dataset), 
+            nrow, ncol, 500, "all") +
   ylim(-2.5, 7.5) + 
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
