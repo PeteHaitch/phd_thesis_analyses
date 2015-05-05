@@ -1818,6 +1818,1393 @@ plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
   ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
 ```
 
+# Scatterplots of pairs of $\beta$-values
+
+```{r}
+methpat <- readRDS("../processed_data/Lister/Lister_1_tuples_strand_collapsed.rds")
+methpat <- methpat[, "ADS"]
+ipd <- c(2, 20, 200, 2000)
+id_dt <- setDT(expand.grid(IPD = ipd, 
+                           strand = levels(droplevels(strand(methpat))),
+                           pair_feature_status = NA))
+id_dt[, c("KEY", "ID") := list(paste(IPD, strand, NA, 
+                                     sep = ''),
+                               seq_len(nrow(id_dt)))]
+setkey(id_dt, ID)
+methpat_order <- order(methpat)
+methpat_rd_sorted <- rowData(methpat)[methpat_order]
+meth_level <- methLevel(methpat, min_cov = 10L)
+in_feature <- rep(NA, nrow(methpat))
+adjacent_pairs_idx <- .Call("Cpp_MethylationTuples_makeAdjacentPairs", 
+                            PACKAGE = "MethylationTuples", 
+                            methpat_order, 
+                            as.character(seqnames(methpat_rd_sorted)), 
+                            as.character(strand(methpat_rd_sorted)), 
+                            start(methpat_rd_sorted), 
+                            in_feature, 
+                            id_dt)
+adjacent_pairs_idx <- lapply(adjacent_pairs_idx, function(x, i) {
+  x[i]
+}, i = which(adjacent_pairs_idx$ID != 0))
+all_pairs_idx <- .Call("Cpp_MethylationTuples_makeAllPairs", 
+                       PACKAGE = "MethylationTuples", 
+                       methpat_order, 
+                       as.character(seqnames(methpat_rd_sorted)), 
+                       as.character(strand(methpat_rd_sorted)), 
+                       start(methpat_rd_sorted), 
+                       in_feature, 
+                       ipd, 
+                       id_dt)
+beta_vals <- data.table(IPD = c(start(methpat_rd_sorted)[adjacent_pairs_idx$j] - 
+                         start(methpat_rd_sorted)[adjacent_pairs_idx$i], 
+                         start(methpat_rd_sorted)[all_pairs_idx$j] - 
+                           start(methpat_rd_sorted)[all_pairs_idx$i]),
+                       beta1 = c(meth_level[methpat_order[adjacent_pairs_idx$i]], 
+                                 meth_level[methpat_order[all_pairs_idx$i]]),
+                       beta2 = c(meth_level[methpat_order[adjacent_pairs_idx$j]], 
+                                 meth_level[methpat_order[all_pairs_idx$j]]),
+                       pair_type = c(rep("adjacent", 
+                                         length(adjacent_pairs_idx$i)),
+                                     rep("all", length(all_pairs_idx$i)))
+                       )
+
+pdf(file = "ADS_beta_scatterplots.pdf", height = 9, width = 16)
+par(mfrow = c(2, 4), mar = c(2.5, 2.5, 1.6, 1.1), mgp = c(1.5, 0.5, 0), 
+    cex = 1.2)
+for (i in c("adjacent", "all")) {
+  for(j in ipd) {
+    x <- beta_vals[pair_type == i & IPD == j, ]
+    n <- nrow(x)
+    cor <- cor(x$beta1, x$beta2, use = "complete.obs", method = "pearson")
+    if (i == "adjacent") {
+      smoothScatter(x = x$beta1, y = x$beta2, sub = paste0("n = ", n),
+                    main = bquote("IPD = " * .(j) * ", " * NIL * 
+                                    "= 0, n = " * .(n)), 
+                    xlab = expression(beta[1]), ylab = expression(beta[2]))
+    } else {
+      smoothScatter(x = x$beta1, y = x$beta2, sub = paste0("n = ", n),
+                    main = bquote("IPD = " * .(j) * ", " * NIL >= 0 * 
+                                    ", n = " * .(n)), 
+                    xlab = expression(beta[1]), ylab = expression(beta[2]))
+    }
+    text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor, 2)))
+  }
+  # A clunky hank to get an outer title
+  title("\nADS", outer = TRUE)
+}
+dev.off()
+```
+
+# Correlation of aggregate co-methylation
+
+## Computations
+
+```{r}
+ipd <- 2:2000
+```
+
+### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+cpgs <- readRDS("cpgs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+### Lister
+
+```{r}
+dataset <- "Lister"
+cpgs <- readRDS("cpgs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples.rds"))
+# Drop chrL since this isn't a human chromosome
+methpat <- dropSeqlevels(methpat, "chrL")
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Drop chrL since this isn't a human chromosome
+methpat <- dropSeqlevels(methpat, "chrL")
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+cpgs <- readRDS("cpgs_mm10.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+### Ziller
+
+```{r}
+dataset <- "Ziller"
+cpgs <- readRDS("cpgs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_1_tuples.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, 
+                     "_merged_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_spearman_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_1_tuples_strand_collapsed.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, 
+        paste0(
+          dataset, 
+          "_merged_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(
+          dataset, 
+          "_merged_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_merged_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, 
+        paste0(
+          dataset, 
+          "_merged_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+## Plots
+
+### Functions
+
+```{r}
+# TODO: Figure out quote-eval the stratifying variable (i.e., strand, 
+# pair_feature_status, method)
+betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol, 
+                        nrow, strand = FALSE, CGI = FALSE, method = FALSE) {
+  if (strand) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = strand, fill = strand), 
+                data = cors) +
+      ylab(paste0(coef, " correlation")) +
+      scale_colour_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+  } else if (CGI) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = CGI, fill = CGI), data = cors) +
+      ylab(paste0(coef, " correlation")) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2")
+  } else if (method) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = method, fill = method), 
+                data = cors) +
+      ylab("Correlation") +
+      scale_colour_brewer(palette = "Accent") + 
+      scale_fill_brewer(palette = "Accent")
+  } else {
+    g <- ggplot(aes(x = IPD, y = cor), data = cors) +
+      ylab(paste0(coef, " correlation"))
+    } 
+  g <- g + 
+    geom_point(alpha = 0.3) + 
+    geom_line(method = 'loess', span = 0.1, lwd = 2, stat = 'smooth') +
+    facet_wrap(~ sample, nrow = nrow, ncol = ncol) + 
+    thesis_theme + 
+    xlim(c(0, xmax)) +
+    coord_cartesian(ylim = c(-1, 1))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  }
+  if (xmax < max(cors[, IPD])) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+      g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+```
+
+### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+### Lister
+
+```{r}
+dataset <- "Lister"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+min_cov <- 10
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+### Ziller
+
+```{r}
+dataset <- "Ziller"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_merged_pearson_vs_spearman_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_merged_pearson_vs_spearman_beta_cors_all_min_cov_",
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+## Spectrum
+
+### Functions
+
+```{r}
+findFreq <- function(x, n = 1000, f = 0.1) {
+  n <- min(min(which(is.na(x))) - 1, n)
+  l <- lowess(x[seq_len(n)], f = f)
+  s <- spectrum(ts(l$y), plot = FALSE, na.action = na.omit)
+  # Take the second value because the first value is the fundamental
+  (1 / s$freq[order(s$spec, decreasing = TRUE)])[1:2]
+}
+```
+
 # Old code: estimating within-fragment co-methylation at individual 2-tuples
 
 __WARNING: This is old code__. 
@@ -2674,1403 +4061,4 @@ g <- ggplot(aes(x = statistic), data = cors) +
 ggsave(paste0(dataset, "_", tolower(coef), "_histogram.pdf"), g, height = 9, 
        width = 16)
 rm(g)
-```
-
-# Scatterplots of pairs of $\beta$-values
-
-```{r}
-methpat <- readRDS("../processed_data/Lister/Lister_1_tuples_strand_collapsed.rds")
-methpat <- methpat[, "ADS"]
-ipd <- c(2, 20, 200, 2000)
-id_dt <- setDT(expand.grid(IPD = ipd, 
-                           strand = levels(droplevels(strand(methpat))),
-                           pair_feature_status = NA))
-id_dt[, c("KEY", "ID") := list(paste(IPD, strand, NA, 
-                                     sep = ''),
-                               seq_len(nrow(id_dt)))]
-setkey(id_dt, ID)
-methpat_order <- order(methpat)
-methpat_rd_sorted <- rowData(methpat)[methpat_order]
-meth_level <- methLevel(methpat, min_cov = 10L)
-in_feature <- rep(NA, nrow(methpat))
-adjacent_pairs_idx <- .Call("Cpp_MethylationTuples_makeAdjacentPairs", 
-                            PACKAGE = "MethylationTuples", 
-                            methpat_order, 
-                            as.character(seqnames(methpat_rd_sorted)), 
-                            as.character(strand(methpat_rd_sorted)), 
-                            start(methpat_rd_sorted), 
-                            in_feature, 
-                            id_dt)
-adjacent_pairs_idx <- lapply(adjacent_pairs_idx, function(x, i) {
-  x[i]
-}, i = which(adjacent_pairs_idx$ID != 0))
-all_pairs_idx <- .Call("Cpp_MethylationTuples_makeAllPairs", 
-                       PACKAGE = "MethylationTuples", 
-                       methpat_order, 
-                       as.character(seqnames(methpat_rd_sorted)), 
-                       as.character(strand(methpat_rd_sorted)), 
-                       start(methpat_rd_sorted), 
-                       in_feature, 
-                       ipd, 
-                       id_dt)
-beta_vals <- data.table(IPD = c(start(methpat_rd_sorted)[adjacent_pairs_idx$j] - 
-                         start(methpat_rd_sorted)[adjacent_pairs_idx$i], 
-                         start(methpat_rd_sorted)[all_pairs_idx$j] - 
-                           start(methpat_rd_sorted)[all_pairs_idx$i]),
-                       beta1 = c(meth_level[methpat_order[adjacent_pairs_idx$i]], 
-                                 meth_level[methpat_order[all_pairs_idx$i]]),
-                       beta2 = c(meth_level[methpat_order[adjacent_pairs_idx$j]], 
-                                 meth_level[methpat_order[all_pairs_idx$j]]),
-                       pair_type = c(rep("adjacent", 
-                                         length(adjacent_pairs_idx$i)),
-                                     rep("all", length(all_pairs_idx$i)))
-                       )
-
-pdf(file = "ADS_beta_scatterplots.pdf", height = 9, width = 16)
-par(mfrow = c(2, 4), mar = c(2.5, 2.5, 1.6, 1.1), mgp = c(1.5, 0.5, 0), 
-    cex = 1.2)
-for (i in c("adjacent", "all")) {
-  for(j in ipd) {
-    x <- beta_vals[pair_type == i & IPD == j, ]
-    n <- nrow(x)
-    cor <- cor(x$beta1, x$beta2, use = "complete.obs", method = "pearson")
-    if (i == "adjacent") {
-      smoothScatter(x = x$beta1, y = x$beta2, sub = paste0("n = ", n),
-                    main = bquote("IPD = " * .(j) * ", " * NIL * 
-                                    "= 0, n = " * .(n)), 
-                    xlab = expression(beta[1]), ylab = expression(beta[2]))
-    } else {
-      smoothScatter(x = x$beta1, y = x$beta2, sub = paste0("n = ", n),
-                    main = bquote("IPD = " * .(j) * ", " * NIL >= 0 * 
-                                    ", n = " * .(n)), 
-                    xlab = expression(beta[1]), ylab = expression(beta[2]))
-    }
-    text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor, 2)))
-  }
-  # A clunky hank to get an outer title
-  title("\nADS", outer = TRUE)
-}
-dev.off()
-```
-
-# Correlation of aggregate co-methylation
-
-## Computations
-
-```{r}
-ipd <- 2:2000
-```
-
-### EPISCOPE
-
-```{r}
-dataset <- "EPISCOPE"
-cpgs <- readRDS("cpgs_hg19.rds")
-cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
-cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
-
-# NIL = 0, strand-separate
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_1_tuples.rds"))
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-separate
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-rm(methpat)
-
-# NIL = 0, strand-collapsed
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_1_tuples_strand_collapsed.rds"))
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-collapsed
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-rm(methpat)
-```
-
-### Lister
-
-```{r}
-dataset <- "Lister"
-cpgs <- readRDS("cpgs_hg18.rds")
-cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
-cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
-
-# NIL = 0, strand-separate
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_1_tuples.rds"))
-# Drop chrL since this isn't a human chromosome
-methpat <- dropSeqlevels(methpat, "chrL")
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-separate
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-rm(methpat)
-
-# NIL = 0, strand-collapsed
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_1_tuples_strand_collapsed.rds"))
-# Drop chrL since this isn't a human chromosome
-methpat <- dropSeqlevels(methpat, "chrL")
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-collapsed
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-rm(methpat)
-```
-
-### Seisenberger
-
-```{r}
-dataset <- "Seisenberger"
-cpgs <- readRDS("cpgs_mm10.rds")
-cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, stringsAsFactors = FALSE)
-cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
-seqlevelsStyle(cgi) <- "NCBI"
-
-# NIL = 0, strand-separate
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_1_tuples.rds"))
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-separate
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-rm(methpat)
-
-# NIL = 0, strand-collapsed
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_1_tuples_strand_collapsed.rds"))
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-collapsed
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
-saveRDS(cors, paste0(dataset, 
-                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-rm(methpat)
-```
-
-### Ziller
-
-```{r}
-dataset <- "Ziller"
-cpgs <- readRDS("cpgs_hg19.rds")
-cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
-cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
-
-# NIL = 0, strand-separate
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_merged_1_tuples.rds"))
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_min_cov_5_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-separate
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
-saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_all_min_cov_5.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, paste0(dataset, 
-                     "_merged_pearson_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 5L)
-saveRDS(cors, 
-        paste0(dataset, 
-               "_merged_spearman_pearson_beta_cors_all_min_cov_5_CGI.rds"))
-rm(cors)
-rm(methpat)
-
-# NIL = 0, strand-collapsed
-methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
-                          "_merged_1_tuples_strand_collapsed.rds"))
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, 
-               "_merged_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, 
-               "_merged_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-## CGI-stratified
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, 
-               "_merged_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
-                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
-                     method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, 
-        paste0(
-          dataset, 
-          "_merged_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-# NIL >= 0, strand-collapsed
-## Genome-wide
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
-saveRDS(cors, 
-        paste0(dataset, 
-               "_merged_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
-saveRDS(cors, 
-        paste0(
-          dataset, 
-          "_merged_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "pearson", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, paste0(
-  dataset, "_merged_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
-                     ref_loci = cpgs, method = "spearman", feature = cgi, 
-                     min_cov = 10L)
-saveRDS(cors, 
-        paste0(
-          dataset, 
-          "_merged_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
-rm(cors)
-rm(methpat)
-```
-
-## Plots
-
-### Functions
-
-```{r}
-# TODO: Figure out quote-eval the stratifying variable (i.e., strand, 
-# pair_feature_status, method)
-betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol, 
-                        nrow, strand = FALSE, CGI = FALSE, method = FALSE, 
-                        CI = FALSE) {
-  if (strand) {
-    g <- ggplot(aes(x = IPD, y = cor, colour = strand, fill = strand), 
-                data = cors) +
-      ylab(paste0(coef, " correlation")) +
-      scale_colour_brewer(palette = "Set1") + 
-      scale_fill_brewer(palette = "Set1")
-  } else if (CGI) {
-    g <- ggplot(aes(x = IPD, y = cor, colour = CGI, fill = CGI), data = cors) +
-      ylab(paste0(coef, " correlation")) +
-      scale_colour_brewer(palette = "Dark2") + 
-      scale_fill_brewer(palette = "Dark2")
-  } else if (method) {
-    g <- ggplot(aes(x = IPD, y = cor, colour = method, fill = method), 
-                data = cors) +
-      ylab("Correlation") +
-      scale_colour_brewer(palette = "Accent") + 
-      scale_fill_brewer(palette = "Accent")
-  } else {
-    g <- ggplot(aes(x = IPD, y = cor), data = cors) +
-      ylab(paste0(coef, " correlation"))
-    } 
-  g <- g + 
-    geom_line(size = 1.2, alpha = 0.8) + 
-    facet_wrap(~ sample, nrow = nrow, ncol = ncol) + 
-    thesis_theme + 
-    xlim(c(0, xmax)) +
-    coord_cartesian(ylim = c(-1, 1))
-  if (pair_type == "all") {
-    g <- g +
-      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
-                       .(min_cov) * " )"))
-  } else if (pair_type == "adjacent") {
-    g <- g +
-      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
-                       .(min_cov) * " )"))
-  }
-  if (xmax < max(cors[, IPD])) {
-    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
-    } else {
-      g <- g + xlab(label = "IPD (bp)")
-      }
-  if (CI) {
-    g <- g + geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper), alpha = 0.5, 
-                         linetype = 0)
-    }
-  g
-  }
-```
-
-### EPISCOPE
-
-```{r}
-dataset <- "EPISCOPE"
-# NIL = 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", method = TRUE)
-ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
-                 ncol = 4, nrow = 3, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-
-# NIL >= 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_all_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_all_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", method = TRUE)
-ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 4, nrow = 3, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-```
-
-### Lister
-
-```{r}
-dataset <- "Lister"
-# NIL = 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", method = TRUE)
-ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
-                 ncol = 5, nrow = 4, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-
-# NIL >= 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_all_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_all_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", method = TRUE)
-ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 5, nrow = 4, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-```
-
-### Seisenberger
-
-```{r}
-dataset <- "Seisenberger"
-# NIL = 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", method = TRUE)
-ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-min_cov <- 10
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 1, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-
-# NIL >= 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_all_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_all_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", method = TRUE)
-ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-                       min_cov, "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 1, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-```
-
-### Ziller
-
-```{r}
-dataset <- "Ziller"
-# NIL = 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", strand = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                               "_beta_cors_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                                "_beta_cors_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", method = TRUE)
-ggsave(paste0(dataset, "_merged_pearson_vs_spearman_beta_cors_min_cov_", 
-              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", CI = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_min_cov_", min_cov, 
-                       "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 3, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-
-# NIL >= 0
-## Demonstrate that strand-specific correlations are very similar, therefore 
-## safe to strand-collapse.
-min_cov <- 5
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, ".rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", strand = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
-              min_cov, ".pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate that Pearson and Spearman give qualitatively similar results
-min_cov <- 10
-coef <- "Pearson"
-pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                               "_beta_cors_all_min_cov_", min_cov, 
-                               "_strand_collapsed.rds"))
-pearson_cors[, method := "Pearson"]
-coef <- "Spearman"
-spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
-                                "_beta_cors_all_min_cov_", min_cov, 
-                                "_strand_collapsed.rds"))
-spearman_cors[, method := "Spearman"]
-cors <- rbind(pearson_cors, spearman_cors)
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", method = TRUE)
-ggsave(paste0(dataset, "_merged_pearson_vs_spearman_beta_cors_all_min_cov_",
-              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
-rm(cors, pearson_cors, spearman_cors, g)
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
-              min_cov, "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed.rds"))
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", CI = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
-              min_cov, "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-## Demonstrate the difference between CpG islands and non islands
-min_cov <- 10
-coef <- "Pearson"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-coef <- "Spearman"
-cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
-                       "_beta_cors_all_min_cov_", min_cov, 
-                       "_strand_collapsed_CGI.rds"))
-cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
-### Drop IPD = 1, which shouldn't occur for CpGs. 
-cors <- cors[IPD != 1, ]
-g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
-                 ncol = 3, nrow = 3, pair_type = "all", CGI = TRUE, CI = TRUE)
-ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_", 
-              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
-rm(cors, g)
-```
-
-## Spectrum
-
-### Functions
-
-```{r}
-findFreq <- function(x, n = 1000, f = 0.1) {
-  n <- min(min(which(is.na(x))) - 1, n)
-  l <- lowess(x[seq_len(n)], f = f)
-  s <- spectrum(ts(l$y), plot = FALSE, na.action = na.omit)
-  # Take the second value because the first value is the fundamental
-  (1 / s$freq[order(s$spec, decreasing = TRUE)])[1:2]
-}
 ```
