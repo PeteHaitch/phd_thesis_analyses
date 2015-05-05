@@ -1040,7 +1040,6 @@ rm(dataset, autosomes)
 # Plots
 
 ```{r}
-thesis_theme <- theme_classic(base_size = 20)
 thesis_theme <- theme_bw(base_size = 20)
 ```
 
@@ -1074,7 +1073,8 @@ betaBoxPlot <- function(beta_reduced, dataset, min_cov, ncol, nrow) {
       facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
       thesis_theme + 
       scale_colour_brewer(palette = "Dark2") +
-      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) + 
+      ylab(bquote(beta * "-value"))
   } else {
     # If there is only one 'sample' then use colour to indicate 'type'. No need
     # for faceting.
@@ -1084,7 +1084,8 @@ betaBoxPlot <- function(beta_reduced, dataset, min_cov, ncol, nrow) {
       geom_boxplot(stat = "identity") + 
       thesis_theme + 
       scale_colour_brewer(palette = "Dark2") +
-      ggtitle(paste0(dataset, ": min. coverage = ", min_cov))
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) +
+      ylab(bquote(beta * "-value"))
   }
   g
 }
@@ -1401,8 +1402,9 @@ nrow <- 3
 min_cov <- 10L
 beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
                                "_beta_by_pm_region.rds"))
-g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
-                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+g <- betaBoxPlot(beta_reduced = beta_reduced, 
+                 dataset = gsub("_merged", "", dataset), min_cov = min_cov, 
+                 ncol = ncol, nrow = nrow)
 beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
 dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
 ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
