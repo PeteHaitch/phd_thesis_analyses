@@ -966,6 +966,103 @@ ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov,
 rm(cors, g)
 ```
 
+## $\beta$-value scatterplots
+
+```{r}
+ipd <- c(2, 20, 200, 2000)
+id_dt <- setDT(expand.grid(IPD = ipd, 
+                           strand = levels(droplevels(strand(one_tuples))),
+                           pair_feature_status = NA))
+id_dt[, c("KEY", "ID") := list(paste(IPD, strand, NA, 
+                                     sep = ''),
+                               seq_len(nrow(id_dt)))]
+setkey(id_dt, ID)
+one_tuples_order <- order(one_tuples)
+one_tuples_rd_sorted <- rowData(one_tuples)[one_tuples_order]
+meth_level <- methLevel(one_tuples, min_cov = 10L)
+in_feature <- rep(NA, nrow(one_tuples))
+adjacent_pairs_idx <- .Call("Cpp_MethylationTuples_makeAdjacentPairs", 
+                            PACKAGE = "MethylationTuples", 
+                            one_tuples_order, 
+                            as.character(seqnames(one_tuples_rd_sorted)), 
+                            as.character(strand(one_tuples_rd_sorted)), 
+                            start(one_tuples_rd_sorted), 
+                            in_feature, 
+                            id_dt)
+adjacent_pairs_idx <- lapply(adjacent_pairs_idx, function(x, i) {
+  x[i]
+}, i = which(adjacent_pairs_idx$ID != 0))
+all_pairs_idx <- .Call("Cpp_MethylationTuples_makeAllPairs", 
+                       PACKAGE = "MethylationTuples", 
+                       one_tuples_order, 
+                       as.character(seqnames(one_tuples_rd_sorted)), 
+                       as.character(strand(one_tuples_rd_sorted)), 
+                       start(one_tuples_rd_sorted), 
+                       in_feature, 
+                       ipd, 
+                       id_dt)
+# UP TO HERE: Will need to do this step separately for each sample
+beta_vals <- data.table(
+  IPD = c(rep(start(one_tuples_rd_sorted)[adjacent_pairs_idx$j] - 
+                  start(one_tuples_rd_sorted)[adjacent_pairs_idx$i], 
+                ncol(one_tuples)),
+          rep(start(one_tuples_rd_sorted)[all_pairs_idx$j] - 
+                start(one_tuples_rd_sorted)[all_pairs_idx$i], 
+              ncol(one_tuples))),
+  beta_1 = c(unlist(meth_level[one_tuples_order[adjacent_pairs_idx$i], ]), 
+             unlist(meth_level[one_tuples_order[all_pairs_idx$i], ])),
+  beta_2 = c(unlist(meth_level[one_tuples_order[adjacent_pairs_idx$j], ]), 
+             unlist(meth_level[one_tuples_order[all_pairs_idx$j], ])),
+  pair_type = c(rep("adjacent", 
+                    ncol(one_tuples) * length(adjacent_pairs_idx$i)[[1]]),
+                rep("all", 
+                    ncol(one_tuples) * length(all_pairs_idx$i)[[1]])),
+  sample = c(rep(colnames(one_tuples), each = length(adjacent_pairs_idx[[1]])),
+             rep(colnames(one_tuples), each = length(all_pairs_idx[[1]])))
+  )
+
+par(mfrow = c(2, 4), mar = c(2.5, 2.5, 1.6, 1.1), mgp = c(1.5, 0.5, 0), 
+    cex = 1.2)
+for (i in c("adjacent", "all")) {
+  for(j in ipd) {
+    x <- beta_vals[pair_type == i & IPD == j, ]
+    n <- x[, sum(!is.na(beta_1) & !is.na(beta_2)), by = sample][, V1]
+    cor <- x[, cor(beta_1, beta_2, use = "complete.obs", method = "spearman"), 
+             by = sample][, n := n]
+    if (i == "adjacent") {
+      par(mfrow = c(2, 3))
+      for (k in 1:6) {
+        xx <-  x[sample == cor$sample[k], ]
+        n <- cor$n[k]
+        cor_ <- cor$V1[k]
+        sn <- cor$sample[k]
+        smoothScatter(x = xx$beta_1, y = xx$beta_2,
+                      sub = paste0("n = ", n),
+                      main = bquote(.(sn) * ": IPD = " * .(j) * ", " * NIL *  
+                                      "= 0, n = " * .(n)), 
+                      xlab = expression(beta[1]), ylab = expression(beta[2]))
+        text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor_, 2)))
+      }
+    } else {
+      par(mfrow = c(2, 3))
+      for (k in 1:6) {
+        xx <-  x[sample == cor$sample[k], ]
+        n <- cor$n[k]
+        cor_ <- cor$V1[k]
+        sn <- cor$sample[k]
+        smoothScatter(x = xx$beta_1, y = xx$beta_2, 
+                      sub = paste0("n = ", n),
+                      main = bquote(.(sn) * ": IPD = " * .(j) * ", " 
+                                    * NIL >= 0 * ", n = " * .(n)), 
+                      xlab = expression(beta[1]), ylab = expression(beta[2]))
+        text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor_, 2)))
+
+      }
+    }
+  }
+}
+```
+
 # Session info
 
 ```{r}
