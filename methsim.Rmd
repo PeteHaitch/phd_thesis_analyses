@@ -510,15 +510,15 @@ saveRDS(m3BII_2, 'm3BII_2.rds')
 x <- readRDS('../processed_data/Lister/Lister_1_tuples_strand_collapsed.rds')
 ADS <- keepSeqlevels(x[, "ADS"], paste0("chr", 1:22))
 m1AI_1 <- readRDS("m1AI_1.rds")
-colnames(m1AI_1) <- "m1AI_1"
+colnames(m1AI_1) <- "m1AI"
 m1BI_1 <- readRDS("m1BI_1.rds")
-colnames(m1BI_1) <- "m1BI_1"
+colnames(m1BI_1) <- "m1BI"
 m2BI_1 <- readRDS("m2BI_1.rds")
-colnames(m2BI_1) <- "m2BI_1"
+colnames(m2BI_1) <- "m2BI"
 m3BI_1 <- readRDS("m3BI_1.rds")
-colnames(m3BI_1) <- "m3BI_1"
+colnames(m3BI_1) <- "m3BI"
 m3BII_1 <- readRDS("m3BII_1.rds")
-colnames(m3BII_1) <- "m3BII_1"
+colnames(m3BII_1) <- "m3BII"
 one_tuples <- combine(ADS, m1AI_1, m1BI_1, m2BI_1, m3BI_1, m3BII_1)
 saveRDS(one_tuples, "one_tuples.rds")
 
@@ -528,15 +528,15 @@ ADS <- keepSeqlevels(x[, "ADS"], paste0("chr", 1:22))
 cpg_pairs <- readRDS("../co-methylation/cpg_pairs_hg18.rds")
 ADS <- subsetByOverlaps(ADS, cpg_pairs, type = "equal")
 m1AI_2 <- readRDS("m1AI_2.rds")
-colnames(m1AI_2) <- "m1AI_2"
+colnames(m1AI_2) <- "m1AI"
 m1BI_2 <- readRDS("m1BI_2.rds")
-colnames(m1BI_2) <- "m1BI_2"
+colnames(m1BI_2) <- "m1BI"
 m2BI_2 <- readRDS("m2BI_2.rds")
-colnames(m2BI_2) <- "m2BI_2"
+colnames(m2BI_2) <- "m2BI"
 m3BI_2 <- readRDS("m3BI_2.rds")
-colnames(m3BI_2) <- "m3BI_2"
+colnames(m3BI_2) <- "m3BI"
 m3BII_2 <- readRDS("m3BII_2.rds")
-colnames(m3BII_2) <- "m3BII_2"
+colnames(m3BII_2) <- "m3BII"
 two_tuples <- combine(ADS, m1AI_2, m1BI_2, m2BI_2, m3BI_2, m3BII_2)
 saveRDS(two_tuples, "two_tuples.rds")
 ```
@@ -727,8 +727,7 @@ plotMHByCGI <- function(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow,
 # TODO: Figure out quote-eval the stratifying variable (i.e., strand, 
 # pair_feature_status, method)
 betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol, 
-                        nrow, strand = FALSE, CGI = FALSE, method = FALSE, 
-                        CI = FALSE) {
+                        nrow, strand = FALSE, CGI = FALSE, method = FALSE) {
   if (strand) {
     g <- ggplot(aes(x = IPD, y = cor, colour = strand, fill = strand), 
                 data = cors) +
@@ -751,7 +750,8 @@ betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol,
       ylab(paste0(coef, " correlation"))
     } 
   g <- g + 
-    geom_line(size = 1.2, alpha = 0.8) + 
+    geom_point(alpha = 0.3) + 
+    geom_line(method = 'loess', span = 0.1, lwd = 2, stat = 'smooth') +
     facet_wrap(~ sample, nrow = nrow, ncol = ncol) + 
     thesis_theme + 
     xlim(c(0, xmax)) +
@@ -767,13 +767,9 @@ betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol,
   }
   if (xmax < max(cors[, IPD])) {
     g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
-    } else {
+  } else {
       g <- g + xlab(label = "IPD (bp)")
-      }
-  if (CI) {
-    g <- g + geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper), alpha = 0.5, 
-                         linetype = 0)
-    }
+  }
   g
 }
 ```
@@ -818,7 +814,7 @@ rm(g)
 
 ```{r}
 library(BiocParallel)
-BPPARAM <- MulticoreParam(3)
+BPPARAM <- MulticoreParam(6)
 # Load data
 dataset <- "methsim"
 cpg_pairs <- readRDS("../co-methylation/cpg_pairs_hg18.rds")
@@ -942,7 +938,7 @@ saveRDS(cors, paste0(dataset,
                      "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
 rm(cors)
 
-## Demonstrate the genome-wide confidence intervals (perhaps not necessary)
+## Demonstrate the genome-level correlations
 min_cov <- 10
 coef <- "Spearman"
 cors <- readRDS(paste0(dataset, "_", tolower(coef), 
@@ -951,9 +947,9 @@ cors <- readRDS(paste0(dataset, "_", tolower(coef),
 ### Drop IPD = 1, which shouldn't occur for CpGs. 
 cors <- cors[IPD != 1, ]
 g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
-                 ncol = 3, nrow = 2, pair_type = "adjacent", CI = TRUE)
+                 ncol = 3, nrow = 2, pair_type = "adjacent")
 ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
-              "_strand_collapsed_CI.pdf"), g, height = 9, width = 16)
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
 rm(cors, g)
 ## Demonstrate the difference between CpG islands and non islands
 min_cov <- 10
@@ -964,8 +960,7 @@ cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_",
 cors <- cors[IPD != 1, ]
 cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
 g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
-                 ncol = 3, nrow = 2, pair_type = "adjacent", CGI = TRUE, 
-                 CI = FALSE)
+                 ncol = 3, nrow = 2, pair_type = "adjacent", CGI = TRUE)
 ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
               "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
 rm(cors, g)
