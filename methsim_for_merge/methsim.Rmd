@@ -1,0 +1,1071 @@
+---
+title: "Supplementary material for A simulation model of DNA methylation data"
+author: "Peter Hickey"
+date: "Modified: 26 April 2015. Compiled: `r format(Sys.Date(), '%d %b %Y')`"
+output:
+  html_document:
+    keep_md: yes
+---
+
+# Different models for $B$, $\psi$ and $W$
+
+## $B$
+
+1. $B$ sampled from the appropriate conditional $\beta$-value distribution but fixed for all $i$ in each region.
+2. $B$ sampled from $Gaussian(\mu_{B}, \sigma_{B}^{2})$, where $\mu_{B}$ is sampled from the appropriate conditional $\beta$-value distribution for each region.
+3. $B$ sampled from a process such that $B_{i + 1}$ depends on $B_{i}$, perhaps except when $(i, i + 1)$ span the boundary.
+
+### Model 3
+
+Ideally, model 3 would be something like this but with `ar` depending on $IPD$.
+
+```{r}
+epsilon <- 0.001
+B <- 0.5
+# Using Bernoulli variance; might require damping around B = 0.5. Also, 
+# imprinted regions would need special handling since the variance is near to 
+# zero.
+x <- arima.sim(model = list(ar = 0.5), n = 1000, sd = sqrt(B * (1 - B)))
+# Use Rcpp::clamp()
+y <- pmin(pmax(epsilon, exp(x) / (1 + exp(x)) - 0.5 + B), 1 - epsilon)
+plot(y, ylim = c(0, 1), type = 'l')
+abline(h = B, col = 'red')
+abline(h = mean(y), col = 'blue')
+```
+
+## $\psi$
+
+A. $\theta = 0$.
+B. $\theta = log(\psi)$ sampled from $Gaussian(\mu, \sigma^2)$, where $\mu$ is sampled from the empirical distribution of $\widehat{\theta_{MH}}$.
+
+Most models use A.
+
+Although there is evidence that the genomic context affects within-fragment co-methylation, this mostly comes from 2-tuples with $NIL \geq 0$ and we do not use these in a 1-step model. So, for now, we just use the chromosome-level estimates without stratification by region-type/CGI (or similar).
+
+## W
+
+I. $W = (1)$
+II. $W = (0.6, 0.25, 0.1, 0.05)$
+
+Most models using I.
+
+# Processing Lister dataset
+
+We process the Lister dataset to extract the required summary statistics. Some of these have been computed in previous chapters and so we simply load the corresponding saved objects.
+
+## Helper functions
+
+Versions of these will be added to `methsim`.
+
+```{r}
+# TODO: Lots of redundancy in this function that can be eliminated.
+processOneTuples <- function(dataset, seqlevels, min_cov, BPPARAM) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_1_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Compute beta-values and annotate by region type
+  beta <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, 
+                                         seqlevels) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::methLevel()
+    val <- funByPM(FUN = MethylationTuples::methLevel, pm = pm, 
+                   methpat = methpat, min_cov = min_cov)
+    # Add information not returned by methLevel()
+    val[, sample := sn]
+    setnames(val, c("beta", "type", "sample"))
+    setkeyv(val, c("sample", "type", "beta"))
+    val
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels,
+    BPPARAM = BPPARAM)
+  beta <- rbindlist(beta)
+  # Tabulate frequency of each beta-value by sample and type.
+  beta_reduced <- beta[, .N, by = list(sample, type, beta)]
+  
+  # Compute standard deviation of logit(beta) by region
+  beta <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, 
+                                         seqlevels) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::methLevel()
+    val <- funByPM(FUN = MethylationTuples::methLevel, pm = pm, 
+                   methpat = methpat, min_cov = min_cov)
+    # Add information not returned by methLevel()
+    rt <- Rle(val[, type])
+    r <- Rle(seq_len(length(runValue(rt))), runLength(rt))
+    val[, c("sample", "region") := list(sn, as.vector(r))]
+    setnames(val, c("beta", "type", "sample", "region"))
+    setkeyv(val, c("sample", "region"))
+    val 
+  }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels,
+  BPPARAM = BPPARAM)
+  beta <- rbindlist(beta)
+  # Compute variance of log(beta-values by region
+  # Add 0.0001 to avoid undefined logits
+  logit_beta_sd <- beta[, sd(log((beta + 0.0001) / (1 - beta + 0.0001)), 
+                               na.rm = TRUE), 
+                         by = list(sample, region, type)]
+  # Remove some NAs (think they come from regions with too few beta-values to
+  # estimate the sd).
+  logit_beta_var[is.na(V1), V1 := 2.5]
+  
+  # TODO: methLevelCor() could be part of this (do I want to stratify by 
+  # region-type)
+  
+  list(beta_reduced = beta_reduced, logit_beta_sd = logit_beta_sd)
+}
+```
+
+## Processing one-tuples
+
+We only process the Lister dataset since this what it is used to illustrate the concept.
+
+```{r}
+dataset <- "Lister"
+# Only autosomes
+one_tuples_data <- processOneTuples(dataset, paste0("chr", 1:22), 10, BPPARAM)
+one_tuples_data$cors <- readRDS(
+  paste0("../co-methylation/", dataset, 
+         "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+saveRDS(one_tuples_data, paste0(dataset, "_one_tuples_data.rds"))
+```
+
+## Processing two-tuples
+
+We only process the Lister dataset since this what it is used to illustrate the concept.
+
+We use the chromosome-level estimates of $\theta$ from 2-tuples with $NIL = 0$ without stratification by region-type. Althought there is evidence that the genomic context affects within-fragment co-methylation, this comes from 2-tuples with $NIL \geq 0$ and we do not use these in a 1-step model.
+
+```{r}
+two_tuples_data <- readRDS(paste0("../co-methylation/", dataset, 
+                                  "_mh_by_ipd_seqnames.rds"))
+saveRDS(two_tuples_data, paste0(dataset, "_two_tuples_data.rds"))
+```
+
+# Simulations
+
+We begin with the included `MethylomeParam` object for the _ADS_ sample (supplied with `v0.5.0.9013` of `methsim`). We create a `SimulatedMethylome` and then modify it according to the following models:
+
+- m1AI
+- m1BI
+- m2BI
+- m3BI
+- m3BII
+
+All simulates are to an average sequencing depth of $23 \times$, consistent with the _ADS_ data.
+
+In all figures we also include the _ADS_ data on which these simulations are based.
+
+```{r}
+library(methsim)
+library(BiocParallel)
+BPPARAM <- MulticoreParam(8)
+set.seed(666)
+sm <- simulate(ADS, seqlevels = paste0("chr", 1:22), BPPARAM = BPPARAM)[[1]]
+```
+
+## Helper functions
+
+```{r}
+# TODO: There's probably a "data.table"-way to do this.
+simulateLOR <- function(ipd, two_tuples_data, max_ipd) {
+  
+  ipd_rank <- rank(ipd, ties.method = "first")
+  ipd_rle <- Rle(ipd[order(ipd)])
+
+  # Don't run in parallel because random number generation in parallel is HARD.
+  lor <- unlist(mapply(function(rv, rl, two_tuples_data, max_ipd) {
+    if (rv <= max_ipd) {
+      mean <- two_tuples_data[IPD == rv, mean(log(estimate))]
+      sd <- two_tuples_data[IPD == rv, sd(log(estimate))]
+      } else {
+        # Assuming independence "on average" for 2-tuples with IPD > max_ipd.
+        mean <- 0
+        sd <- two_tuples_data[IPD < max_ipd, 
+                              sd(log(estimate)), 
+                              by = IPD][, mad(V1, na.rm = TRUE)]
+      }
+    rnorm(rl, mean, sd)    
+    }, rv = runValue(ipd_rle), rl = runLength(ipd_rle), 
+    MoreArgs = list(two_tuples_data = two_tuples_data, max_ipd = max_ipd), 
+    SIMPLIFY = FALSE), use.names = FALSE)
+  lor[ipd_rank]
+}
+```
+
+## IPDs
+
+```{r}
+library(BSgenome.Hsapiens.UCSC.hg18)
+exclude <- setdiff(seqlevels(BSgenome.Hsapiens.UCSC.hg18), paste0("chr", 1:22))
+two_tuples <- findMTuples(BSgenome.Hsapiens.UCSC.hg18, MethInfo('CG'), 2,
+                          exclude)
+two_tuples <- unstrand(two_tuples[strand(two_tuples) == "+"])
+ipd <- as.vector(IPD(two_tuples))
+rm(two_tuples)
+```
+
+## m1AI
+
+Need to update the `LOR` assay to be identically zero.
+
+```{r}
+m1AI <- sm
+assay(m1AI, "LOR") <- matrix(0, nrow = nrow(m1AI), ncol = 1,
+                             dimnames = list(NULL, "component_1"))
+# Simulate some reads
+wgbsp_m1AI <- WGBSParam(SimulatedMethylome = m1AI, 
+                        AveCov = 23, 
+                        ErrorRate = 0.01, 
+                        SequencingType = "SE", 
+                        ReadLength = 200)
+sbs_m1AI <- simulate(wgbsp_m1AI, BPPARAM = BPPARAM)[[1]]
+saveRDS(wgbsp_m1AI, 'wgbsp_m1AI.rds')
+m1AI_1 <- asMethPat(sbs_m1AI, size = 1L)
+saveRDS(m1AI_1, 'm1AI_1.rds')
+m1AI_2 <- asMethPat(sbs_m1AI, size = 2L)
+saveRDS(m1AI_2, 'm1AI_2.rds')
+```
+
+## m1BI
+
+```{r}
+m1BI <- m1AI
+# A single component (i.e. no mixture)
+n_components <- 1L
+
+# max_ipd should be data-driven. This is a the point up to which we 'trust' the 
+# Mantel-Haenszel estimates of theta, i.e. the point at which they are 
+# dominated by noise due to insufficient 2-tuples with the given IPD.
+max_ipd <- 180
+
+ttd <- two_tuples_data[sampleName == "ADS" & 
+                         seqnames %in% paste0("chr", 1:22), ]
+lor_by_pair <- replicate(n_components,
+                           simulateLOR(ipd = ipd, 
+                                       two_tuples_data = ttd,
+                                       max_ipd),
+                           simplify = "array")
+# Add a value of LOR = 0 for the first methylation locus of each
+# seqlevel.
+# NB the number of components is fixed at 1.
+cn <- paste0("component_", seq_len(n_components))
+lor <- matrix(0,
+              nrow = nrow(m1BI),
+              ncol = n_components,
+              dimnames = list(NULL, cn))
+first_loci <- start(seqnames(m1BI))
+lor[-c(first_loci), ] <- lor_by_pair
+assay(m1BI, "LOR") <- lor
+# Simulate some reads
+wgbsp_m1BI <- WGBSParam(SimulatedMethylome = m1BI, 
+                        AveCov = 23, 
+                        ErrorRate = 0.01, 
+                        SequencingType = "SE", 
+                        ReadLength = 200)
+sbs_m1BI <- simulate(wgbsp_m1BI, BPPARAM = BPPARAM)[[1]]
+saveRDS(wgbsp_m1BI, 'wgbsp_m1BI.rds')
+m1BI_1 <- asMethPat(sbs_m1BI, size = 1L)
+saveRDS(m1BI_1, 'm1BI_1.rds')
+m1BI_2 <- asMethPat(sbs_m1BI, size = 2L)
+saveRDS(m1BI_2, 'm1BI_2.rds')
+```
+
+## m2BI
+
+```{r}
+m2BI <- m1BI
+first_loci <- start(seqnames(m2BI))
+pm <- keepSeqlevels(ADS@PartitionedMethylome, paste0("chr", 1:22))
+ol <- findOverlaps(pm, m2BI)
+cqh <- countQueryHits(ol)
+# Put in zeros for regions with no CpGs otherwise subsequent vectors are of the
+# wrong length.
+cqh[is.na(cqh)] <- 0L
+mu_df <- data.frame(mu = assay(m2BI, "MarginalProb")[selectHits(ol, "first"), ],
+                    n = cqh)
+rt <- regionType(pm)
+rt_idx <- seq_len(length(rt))[order(rt)]
+trt <- table(rt)
+# Not using the empirical standard deviations cause I haven't figured out how 
+# to do this properly.
+# logit_beta_sd <- mapply(function(rt_, nrt_, logit_beta_sd) {
+#   logit_beta_sd[type == rt_ & !is.na(V1), 
+#                 sample(V1, size = nrt_, replace = TRUE)]
+#   }, rt_ = names(trt), nrt_ = trt, 
+#   MoreArgs = list(
+#     logit_beta_sd = one_tuples_data$logit_beta_sd[sample == "ADS", ]), 
+#   SIMPLIFY = FALSE, USE.NAMES = FALSE)
+# logit_beta_sd <- unlist(logit_beta_sd)[rt_idx]
+mp <- Map(function(mean, n) {
+  epsilon <- 0.01
+  if (n > 0) {
+    # Perturbations are simulated on the logistic scale
+    # Not using the empirical standard deviations cause I haven't figured out how 
+    # to do this properly.
+#     x <- arima.sim(model = list(), n = n, sd = sd)
+    x <- arima.sim(model = list(), n = n, sd = sqrt(mean * (1 - mean)))
+    # Have to constrain in [epsilon, 1 - epsilon] to avoid boundary value
+    # errors when computing transition probabilities. Also, the perturbations
+    # can put the simulated betas outside [0, 1].
+    as.vector(pmin(pmax(mean - 0.5 + exp(x) / (1 + exp(x)), epsilon), 
+                   1 - epsilon))
+  } else {
+    numeric(0)
+  }
+}, n = mu_df$n, mean = mu_df$mu)
+mp <- matrix(unlist(mp), dimnames = list(NULL, "component_1"))
+assay(m2BI, "MarginalProb") <- mp
+# Simulate some reads
+wgbsp_m2BI <- WGBSParam(SimulatedMethylome = m2BI, 
+                        AveCov = 23, 
+                        ErrorRate = 0.01, 
+                        SequencingType = "SE", 
+                        ReadLength = 200)
+sbs_m2BI <- simulate(wgbsp_m2BI, BPPARAM = BPPARAM)[[1]]
+saveRDS(wgbsp_m2BI, 'wgbsp_m2BI.rds')
+m2BI_1 <- asMethPat(sbs_m2BI, size = 1L)
+saveRDS(m2BI_1, 'm2BI_1.rds')
+m2BI_2 <- asMethPat(sbs_m2BI, size = 2L)
+saveRDS(m2BI_2, 'm2BI_2.rds')
+```
+
+## m3BI
+
+```{r}
+m3BI <- m1BI
+first_loci <- start(seqnames(m3BI))
+pm <- keepSeqlevels(ADS@PartitionedMethylome, paste0("chr", 1:22))
+ol <- findOverlaps(pm, m3BI)
+cqh <- countQueryHits(ol)
+# Put in zeros for regions with no CpGs otherwise subsequent vectors are of the
+# wrong length.
+cqh[is.na(cqh)] <- 0L
+mu_df <- data.frame(mu = assay(m3BI, "MarginalProb")[selectHits(ol, "first"), ],
+                    n = cqh)
+rt <- regionType(pm)
+rt_idx <- seq_len(length(rt))[order(rt)]
+trt <- table(rt)
+# Not using the empirical standard deviations cause I haven't figured out how 
+# to do this properly.
+# logit_beta_sd <- mapply(function(rt_, nrt_, logit_beta_sd) {
+#   logit_beta_sd[type == rt_ & !is.na(V1), 
+#                 sample(V1, size = nrt_, replace = TRUE)]
+#   }, rt_ = names(trt), nrt_ = trt, 
+#   MoreArgs = list(
+#     logit_beta_sd = one_tuples_data$logit_beta_sd[sample == "ADS", ]), 
+#   SIMPLIFY = FALSE, USE.NAMES = FALSE)
+# logit_beta_sd <- unlist(logit_beta_sd)[rt_idx]
+mp <- Map(function(mean, n, sd, ar_rho) {
+  epsilon <- 0.01
+  if (n > 0) {
+    # Perturbations are simulated on the logistic scale
+    # Not using the empirical standard deviations cause I haven't figured out how 
+    # to do this properly.
+#     x <- arima.sim(model = list(), n = n, sd = sd)
+    x <- arima.sim(model = list(ar = ar_rho), n = n, 
+                   sd = sqrt(mean * (1 - mean)))
+    # Have to constrain in [epsilon, 1 - epsilon] to avoid boundary value
+    # errors when computing transition probabilities. Also, the perturbations
+    # can put the simulated betas outside [0, 1].
+    as.vector(pmin(pmax(mean - 0.5 + exp(x) / (1 + exp(x)), epsilon), 
+                   1 - epsilon))
+  } else {
+    numeric(0)
+  }
+}, n = mu_df$n, mean = mu_df$mu, ar_rho = 0.5)
+mp <- matrix(unlist(mp), dimnames = list(NULL, "component_1"))
+assay(m3BI, "MarginalProb") <- mp
+# Simulate some reads
+wgbsp_m3BI <- WGBSParam(SimulatedMethylome = m3BI, 
+                        AveCov = 23, 
+                        ErrorRate = 0.01, 
+                        SequencingType = "SE", 
+                        ReadLength = 200)
+sbs_m3BI <- simulate(wgbsp_m3BI, BPPARAM = BPPARAM)[[1]]
+saveRDS(wgbsp_m3BI, 'wgbsp_m3BI.rds')
+m3BI_1 <- asMethPat(sbs_m3BI, size = 1L)
+saveRDS(m3BI_1, 'm3BI_1.rds')
+m3BI_2 <- asMethPat(sbs_m3BI, size = 2L)
+saveRDS(m3BI_2, 'm3BI_2.rds')
+```
+
+## m3BII
+
+```{r}
+# Create what will eventually be component_2, component_3 and component_4
+# (component_1) will match that of m3BI
+ADS@MixtureWeights <- c(0.6, 0.25, 0.1, 0.05)
+m3BII <- simulate(ADS, seqlevels = paste0("chr", 1:22), BPPARAM = BPPARAM)[[1]]
+first_loci <- start(seqnames(m3BII))
+pm <- keepSeqlevels(ADS@PartitionedMethylome, paste0("chr", 1:22))
+ol <- findOverlaps(pm, m3BII)
+cqh <- countQueryHits(ol)
+# Put in zeros for regions with no CpGs otherwise subsequent vectors are of the
+# wrong length.
+cqh[is.na(cqh)] <- 0L
+mp <- vector("list", 3)
+for (i in 2:4) {
+  mu_df <- data.frame(mu = assay(m3BII, "MarginalProb")[
+    selectHits(ol, "first"), i],
+                      n = cqh)
+  rt <- regionType(pm)
+  rt_idx <- seq_len(length(rt))[order(rt)]
+  trt <- table(rt)
+  # Not using the empirical standard deviations cause I haven't figured out how 
+  # to do this properly.
+  # logit_beta_sd <- mapply(function(rt_, nrt_, logit_beta_sd) {
+  #   logit_beta_sd[type == rt_ & !is.na(V1), 
+  #                 sample(V1, size = nrt_, replace = TRUE)]
+  #   }, rt_ = names(trt), nrt_ = trt, 
+  #   MoreArgs = list(
+  #     logit_beta_sd = one_tuples_data$logit_beta_sd[sample == "ADS", ]), 
+  #   SIMPLIFY = FALSE, USE.NAMES = FALSE)
+  # logit_beta_sd <- unlist(logit_beta_sd)[rt_idx]
+  mp[[i - 1]] <- Map(function(mean, n, sd, ar_rho) {
+    epsilon <- 0.01
+    if (n > 0) {
+      # Perturbations are simulated on the logistic scale
+      # Not using the empirical standard deviations cause I haven't figured out how 
+      # to do this properly.
+      #     x <- arima.sim(model = list(), n = n, sd = sd)
+      x <- arima.sim(model = list(ar = ar_rho), n = n, 
+                     sd = sqrt(mean * (1 - mean)))
+      # Have to constrain in [epsilon, 1 - epsilon] to avoid boundary value
+      # errors when computing transition probabilities. Also, the perturbations
+      # can put the simulated betas outside [0, 1].
+      as.vector(pmin(pmax(mean - 0.5 + exp(x) / (1 + exp(x)), epsilon), 
+                     1 - epsilon))
+      } else {
+        numeric(0)
+        }
+    }, n = mu_df$n, mean = mu_df$mu, ar_rho = 0.5)
+}
+mp <- cbind(assay(m3BI, "MarginalProb"), 
+            matrix(unlist(mp), ncol = 3, 
+                   dimnames = list(NULL, paste0("component_", 2:4))))
+# Three extra components
+n_components <- 3L
+# max_ipd should be data-driven. This is a the point up to which we 'trust' the 
+# Mantel-Haenszel estimates of theta, i.e. the point at which they are 
+# dominated by noise due to insufficient 2-tuples with the given IPD.
+max_ipd <- 180
+ttd <- two_tuples_data[sampleName == "ADS" & 
+                         seqnames %in% paste0("chr", 1:22), ]
+lor_by_pair <- replicate(n_components,
+                           simulateLOR(ipd = ipd, 
+                                       two_tuples_data = ttd,
+                                       max_ipd),
+                           simplify = "array")
+# Add a value of LOR = 0 for the first methylation locus of each
+# seqlevel.
+# NB the number of components is fixed at 1.
+cn <- paste0("component_", seq(2, 4))
+lor <- matrix(0,
+              nrow = nrow(m3BII),
+              ncol = n_components,
+              dimnames = list(NULL, cn))
+first_loci <- start(seqnames(m1BI))
+lor[-c(first_loci), ] <- lor_by_pair
+lor <- cbind(assay(m3BI, "LOR"), lor)
+mw <- DataFrame("component_1" = Rle(0.60, nrow(m3BII)),
+                "component_2" = Rle(0.25, nrow(m3BII)),
+                "component_3" = Rle(0.10, nrow(m3BII)),
+                "component_4" = Rle(0.05, nrow(m3BII)))
+assays <- SimpleList(MarginalProb = mp, LOR = lor, MixtureWeights = mw)
+m3BII <- new("SimulatedMethylome",
+             SummarizedExperiment(assays = assays, 
+                                  rowRanges = rowRanges(m3BII)))
+# Simulate some reads
+wgbsp_m3BII <- WGBSParam(SimulatedMethylome = m3BII, 
+                         AveCov = 23, 
+                         ErrorRate = 0.01, 
+                         SequencingType = "SE", 
+                         ReadLength = 200)
+sbs_m3BII <- simulate(wgbsp_m3BII, BPPARAM = BPPARAM)[[1]]
+saveRDS(wgbsp_m3BII, 'wgbsp_m3BII.rds')
+m3BII_1 <- asMethPat(sbs_m3BII, size = 1L)
+saveRDS(m3BII_1, 'm3BII_1.rds')
+m3BII_2 <- asMethPat(sbs_m3BII, size = 2L)
+saveRDS(m3BII_2, 'm3BII_2.rds')
+```
+
+## Combine _ADS_ and simulated `MethPat` objects
+
+```{r}
+x <- readRDS('../processed_data/Lister/Lister_1_tuples_strand_collapsed.rds')
+ADS <- keepSeqlevels(x[, "ADS"], paste0("chr", 1:22))
+m1AI_1 <- readRDS("m1AI_1.rds")
+colnames(m1AI_1) <- "m1AI"
+m1BI_1 <- readRDS("m1BI_1.rds")
+colnames(m1BI_1) <- "m1BI"
+m2BI_1 <- readRDS("m2BI_1.rds")
+colnames(m2BI_1) <- "m2BI"
+m3BI_1 <- readRDS("m3BI_1.rds")
+colnames(m3BI_1) <- "m3BI"
+m3BII_1 <- readRDS("m3BII_1.rds")
+colnames(m3BII_1) <- "m3BII"
+one_tuples <- combine(ADS, m1AI_1, m1BI_1, m2BI_1, m3BI_1, m3BII_1)
+saveRDS(one_tuples, "one_tuples.rds")
+
+x <- readRDS('../processed_data/Lister/Lister_2_tuples_strand_collapsed.rds')
+ADS <- keepSeqlevels(x[, "ADS"], paste0("chr", 1:22))
+# Drop NIL > 0 pairs
+cpg_pairs <- readRDS("../co-methylation/cpg_pairs_hg18.rds")
+ADS <- subsetByOverlaps(ADS, cpg_pairs, type = "equal")
+m1AI_2 <- readRDS("m1AI_2.rds")
+colnames(m1AI_2) <- "m1AI"
+m1BI_2 <- readRDS("m1BI_2.rds")
+colnames(m1BI_2) <- "m1BI"
+m2BI_2 <- readRDS("m2BI_2.rds")
+colnames(m2BI_2) <- "m2BI"
+m3BI_2 <- readRDS("m3BI_2.rds")
+colnames(m3BI_2) <- "m3BI"
+m3BII_2 <- readRDS("m3BII_2.rds")
+colnames(m3BII_2) <- "m3BII"
+two_tuples <- combine(ADS, m1AI_2, m1BI_2, m2BI_2, m3BI_2, m3BII_2)
+saveRDS(two_tuples, "two_tuples.rds")
+```
+
+# Plots
+
+## Helper functions
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(data.table)
+thesis_theme <- theme_bw(base_size = 20)
+
+plotBetaDensity <- function(methpat, min_cov, dataset, nrow, ncol, 
+                            sample_order = colnames(methpat), feature = NULL, 
+                            feature_name = NULL) {
+  beta <- methLevel(methpat, min_cov = min_cov)
+  if (!identical(colnames(beta), sample_order)) {
+    beta <- beta[, sample_order]
+    }
+  if (!is.null(feature)) {
+    feature_status <- overlapsAny(methpat, feature)
+    beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                       beta = as.vector(beta),
+                       feature = rep(feature_status, times = ncol(beta)),
+                       stringsAsFactors = FALSE)
+    } else {
+      beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                         beta = as.vector(beta),
+                         stringsAsFactors = FALSE)
+      }
+  beta_df <- tbl_df(beta)
+  blank <- ggplot(aes(x = beta), data = beta_df) +
+    geom_blank(aes(y = ..scaled..), stat = "density") + 
+    scale_x_continuous(limits = c(0, 1.01), 
+                       expression(paste(beta, "-values", sep = "")))
+  if (!is.null(feature)) {
+    blank +
+      geom_density(aes(y = ..scaled.., colour = feature), 
+                   size = 1.5) +
+      facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                       "-values (min. coverage = " * .(min_cov) * " )")) +
+      labs(colour = feature_name)
+    } else {
+      blank +
+        geom_density(aes(y = ..scaled..), size = 1.5) +
+        facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+        scale_colour_brewer(palette = "Dark2") +
+        ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                         "-values (min. coverage = " * .(min_cov) * " )"))
+      }
+}
+
+plotBetaFreqPoly <- function(methpat, min_cov, dataset, nrow, ncol, 
+                             sample_order = colnames(methpat), feature = NULL, 
+                             feature_name = NULL) {
+  beta <- methLevel(methpat, min_cov = min_cov)
+  if (!identical(colnames(beta), sample_order)) {
+    beta <- beta[, sample_order]
+    }
+  if (!is.null(feature)) {
+    feature_status <- overlapsAny(methpat, feature)
+    beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                       beta = as.vector(beta),
+                       feature = rep(feature_status, times = ncol(beta)),
+                       stringsAsFactors = FALSE)
+    } else {
+      beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                         beta = as.vector(beta),
+                         stringsAsFactors = FALSE)
+      }
+  beta_df <- tbl_df(beta)
+  # nn is the count of the non-NA beta-values for each sample, which is used to 
+  # normalise the density plots.
+  beta_df <- group_by(beta_df, Sample) %>% mutate(n = sum(!is.na(beta)))
+  # Create blank plot to get common scales based on feature-less plot
+  blank <- ggplot(aes(x = beta), data = beta_df) +
+    geom_blank(aes(n = n, y = ..count.. / n * 100), stat = "bin", 
+               binwidth = 0.01) + 
+    scale_x_continuous(limits = c(0, 1.01), 
+                       expression(paste(beta, "-values (binwidth = 0.01)", 
+                                        sep = ""))) +
+    ylab("Percentage of CpGs")
+  if (!is.null(feature)) {
+    blank +
+      geom_freqpoly(aes(n = n, y = ..count.. / n * 100, colour = feature), 
+                    binwidth = 0.01, size = 1.5) +
+      facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                       "-values (min. coverage = " * .(min_cov) * " )")) +
+      labs(colour = feature_name)
+    } else {
+      blank +
+        geom_freqpoly(aes(n = n, y = ..count.. / n * 100), 
+                      binwidth = 0.01, size = 1.5) +
+        facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+        scale_colour_brewer(palette = "Dark2") +
+        ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                         "-values (min. coverage = " * .(min_cov) * " )"))
+      }
+}
+
+# TODO: Check transparency (alpha) prints okay.
+# TODO: Perhaps rotate x-tick labels.
+# TODO: Add genome-wide line to legend.
+plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax, 
+                   pair_type, annotate = TRUE, seqlevels = NULL) {
+  
+  # A hack to annotate chromosome as autosome, X, Y or mtDNA
+  uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
+  chromosome <- vector("character", length(uniq_seqnames))
+  autosomes <- grep("[0-9]", uniq_seqnames)
+  chromosome[autosomes] <- "autosome"
+  X <- grep("X", uniq_seqnames)
+  chromosome[X] <- "X"
+  Y <- grep("Y", uniq_seqnames)
+  chromosome[Y] <- "Y"
+  MT <- grep("M", uniq_seqnames)
+  chromosome[MT] <- "MT"
+  names(chromosome) <- uniq_seqnames
+  mh_by_ipd_seqnames[, chromosome := chromosome[seqnames]]
+  
+  if (!is.null(seqlevels)) {
+    mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
+  }
+  
+  g <- ggplot(aes(x = IPD, y = log(estimate)), data = mh_by_ipd_seqnames)
+  
+  if (annotate) {
+    g <- g + geom_point(aes(col = chromosome), alpha = 0.25)
+  } else {
+    g <- g + geom_point(alpha = 0.25)
+  }
+  g <- g + facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) + 
+    xlim(c(0, xmax)) +
+    geom_line(aes(x = IPD, y = log(estimate)), data = mh_by_ipd, 
+              col = 'dodgerBlue', lwd = 1.3) + 
+    thesis_theme +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(hat(theta))) +
+    guides(colour = guide_legend(override.aes = list(alpha = 1)))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+plotMHByCGI <- function(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, 
+                        ncol, xmax, pair_type) {
+  x <- rbind(in_cgi_mh_by_ipd[, CGI:= TRUE], out_cgi_mh_by_ipd[, CGI := FALSE])
+  # TODO: Add Dark2 colours so as to be consistent with cor(beta). Add to legend
+  g <- ggplot(aes(x = IPD, y = log(estimate), col = CGI), data = x) + 
+    geom_line(lwd = 1.3) +
+    scale_color_brewer(palette = "Dark2") +
+    thesis_theme +
+    xlim(c(0, xmax)) +
+    facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(hat(theta)))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+# TODO: Figure out quote-eval the stratifying variable (i.e., strand, 
+# pair_feature_status, method)
+betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol, 
+                        nrow, strand = FALSE, CGI = FALSE, method = FALSE) {
+  if (strand) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = strand, fill = strand), 
+                data = cors) +
+      ylab(paste0(coef, " correlation")) +
+      scale_colour_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+  } else if (CGI) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = CGI, fill = CGI), data = cors) +
+      ylab(paste0(coef, " correlation")) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2")
+  } else if (method) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = method, fill = method), 
+                data = cors) +
+      ylab("Correlation") +
+      scale_colour_brewer(palette = "Accent") + 
+      scale_fill_brewer(palette = "Accent")
+  } else {
+    g <- ggplot(aes(x = IPD, y = cor), data = cors) +
+      ylab(paste0(coef, " correlation"))
+    } 
+  g <- g + 
+    geom_point(alpha = 0.3) + 
+    geom_line(method = 'loess', span = 0.1, lwd = 2, stat = 'smooth') +
+    facet_wrap(~ sample, nrow = nrow, ncol = ncol) + 
+    thesis_theme + 
+    xlim(c(0, xmax)) +
+    coord_cartesian(ylim = c(-1, 1))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  }
+  if (xmax < max(cors[, IPD])) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+      g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+```
+
+## $\beta$-value distributions
+
+```{r}
+dataset <- "methsim"
+g <- plotBetaFreqPoly(methpat = one_tuples, min_cov = 10L, dataset = dataset, 
+                      nrow = 2, ncol = 3) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly.pdf"), g, width = 16, height = 9)
+rm(g)
+g <- plotBetaDensity(methpat = one_tuples, min_cov = 10L, dataset = dataset, 
+                     nrow = 2, ncol = 3) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# CpG islands
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+g <- plotBetaFreqPoly(methpat = one_tuples, min_cov = 10L, dataset = dataset, 
+                      nrow = 2, ncol = 3, feature = cgi, 
+                      feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly_CGI.pdf"), g, width = 16, height = 9)
+g <- plotBetaDensity(methpat = one_tuples, min_cov = 10L, dataset = dataset, 
+                     nrow = 2, ncol = 3, feature = cgi, 
+                     feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity_CGI.pdf"), g, width = 16, height = 9)
+rm(g)
+```
+
+## Within-fragment co-methylation
+
+```{r}
+library(BiocParallel)
+BPPARAM <- MulticoreParam(6)
+# Load data
+dataset <- "methsim"
+cpg_pairs <- readRDS("../co-methylation/cpg_pairs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+## Remove pairs with NIL > 0
+two_tuples <- subsetByOverlaps(two_tuples, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(two_tuples, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(two_tuples), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(two_tuples, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(two_tuples), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(two_tuples), IRanges(start(two_tuples), width = 1L), 
+                    strand(two_tuples), seqinfo = seqinfo(two_tuples))
+rd_end <- GRanges(seqnames(two_tuples), IRanges(end(two_tuples), width = 1L), 
+                  strand(two_tuples), seqinfo = seqinfo(two_tuples))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(two_tuples[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(two_tuples), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(two_tuples[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(two_tuples), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(two_tuples[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(two_tuples), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(two_tuples[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(two_tuples), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+
+# Plots
+nrow <- 2
+ncol <- 3
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+g <- plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+ggsave(paste0(dataset, "_MH_by_seqnames.pdf"), g, width = 16, height = 9)
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+g <- plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+                 "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+ggsave(paste0(dataset, "_MH_by_CGI.pdf"), g, width = 16, height = 9)
+
+# NB: asMethPat() can't create 2-tuples with NIL >= 0
+```
+
+## Correlations of $\beta$-values
+
+```{r}
+ipd <- 2:5000
+dataset <- "methsim"
+cpgs <- readRDS("../co-methylation/cpgs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-collapsed
+one_tuples <- readRDS("one_tuples.rds")
+## Genome-wide
+cors <- methLevelCor(one_tuples, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(one_tuples, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 2, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 3, nrow = 2, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+## $\beta$-value scatterplots
+
+```{r}
+ipd <- c(2, 20, 200, 2000)
+id_dt <- setDT(expand.grid(IPD = ipd, 
+                           strand = levels(droplevels(strand(one_tuples))),
+                           pair_feature_status = NA))
+id_dt[, c("KEY", "ID") := list(paste(IPD, strand, NA, 
+                                     sep = ''),
+                               seq_len(nrow(id_dt)))]
+setkey(id_dt, ID)
+one_tuples_order <- order(one_tuples)
+one_tuples_rd_sorted <- rowData(one_tuples)[one_tuples_order]
+meth_level <- methLevel(one_tuples, min_cov = 10L)
+in_feature <- rep(NA, nrow(one_tuples))
+adjacent_pairs_idx <- .Call("Cpp_MethylationTuples_makeAdjacentPairs", 
+                            PACKAGE = "MethylationTuples", 
+                            one_tuples_order, 
+                            as.character(seqnames(one_tuples_rd_sorted)), 
+                            as.character(strand(one_tuples_rd_sorted)), 
+                            start(one_tuples_rd_sorted), 
+                            in_feature, 
+                            id_dt)
+adjacent_pairs_idx <- lapply(adjacent_pairs_idx, function(x, i) {
+  x[i]
+}, i = which(adjacent_pairs_idx$ID != 0))
+all_pairs_idx <- .Call("Cpp_MethylationTuples_makeAllPairs", 
+                       PACKAGE = "MethylationTuples", 
+                       one_tuples_order, 
+                       as.character(seqnames(one_tuples_rd_sorted)), 
+                       as.character(strand(one_tuples_rd_sorted)), 
+                       start(one_tuples_rd_sorted), 
+                       in_feature, 
+                       ipd, 
+                       id_dt)
+# UP TO HERE: Will need to do this step separately for each sample
+beta_vals <- data.table(
+  IPD = c(rep(start(one_tuples_rd_sorted)[adjacent_pairs_idx$j] - 
+                  start(one_tuples_rd_sorted)[adjacent_pairs_idx$i], 
+                ncol(one_tuples)),
+          rep(start(one_tuples_rd_sorted)[all_pairs_idx$j] - 
+                start(one_tuples_rd_sorted)[all_pairs_idx$i], 
+              ncol(one_tuples))),
+  beta_1 = c(unlist(meth_level[one_tuples_order[adjacent_pairs_idx$i], ]), 
+             unlist(meth_level[one_tuples_order[all_pairs_idx$i], ])),
+  beta_2 = c(unlist(meth_level[one_tuples_order[adjacent_pairs_idx$j], ]), 
+             unlist(meth_level[one_tuples_order[all_pairs_idx$j], ])),
+  pair_type = c(rep("adjacent", 
+                    ncol(one_tuples) * length(adjacent_pairs_idx$i)[[1]]),
+                rep("all", 
+                    ncol(one_tuples) * length(all_pairs_idx$i)[[1]])),
+  sample = c(rep(colnames(one_tuples), each = length(adjacent_pairs_idx[[1]])),
+             rep(colnames(one_tuples), each = length(all_pairs_idx[[1]])))
+  )
+
+par(mfrow = c(2, 4), mar = c(2.5, 2.5, 1.6, 1.1), mgp = c(1.5, 0.5, 0), 
+    cex = 1.2)
+for (i in c("adjacent", "all")) {
+  for(j in ipd) {
+    x <- beta_vals[pair_type == i & IPD == j, ]
+    n <- x[, sum(!is.na(beta_1) & !is.na(beta_2)), by = sample][, V1]
+    cor <- x[, cor(beta_1, beta_2, use = "complete.obs", method = "spearman"), 
+             by = sample][, n := n]
+    if (i == "adjacent") {
+      par(mfrow = c(2, 3))
+      for (k in 1:6) {
+        xx <-  x[sample == cor$sample[k], ]
+        n <- cor$n[k]
+        cor_ <- cor$V1[k]
+        sn <- cor$sample[k]
+        smoothScatter(x = xx$beta_1, y = xx$beta_2,
+                      sub = paste0("n = ", n),
+                      main = bquote(.(sn) * ": IPD = " * .(j) * ", " * NIL *  
+                                      "= 0, n = " * .(n)), 
+                      xlab = expression(beta[1]), ylab = expression(beta[2]))
+        text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor_, 2)))
+      }
+    } else {
+      par(mfrow = c(2, 3))
+      for (k in 1:6) {
+        xx <-  x[sample == cor$sample[k], ]
+        n <- cor$n[k]
+        cor_ <- cor$V1[k]
+        sn <- cor$sample[k]
+        smoothScatter(x = xx$beta_1, y = xx$beta_2, 
+                      sub = paste0("n = ", n),
+                      main = bquote(.(sn) * ": IPD = " * .(j) * ", " 
+                                    * NIL >= 0 * ", n = " * .(n)), 
+                      xlab = expression(beta[1]), ylab = expression(beta[2]))
+        text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor_, 2)))
+
+      }
+    }
+  }
+}
+```
+
+# Session info
+
+```{r}
+library(devtools)
+session_info()
+```

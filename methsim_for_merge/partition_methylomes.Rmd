@@ -1,0 +1,1515 @@
+---
+title: "Partitioning methylomes and summarising the partitions"
+author: "Peter Hickey"
+date: "29/03/2015"
+output: html_document
+---
+
+# Preliminaries
+
+```{r}
+library(methsim)
+library(BiocParallel)
+library(ggplot2)
+library(devtools)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+# Partition the methylomes
+
+Set seed for reproducibility:
+
+```{r}
+set.seed(666)
+```
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+library(BSgenome.Hsapiens.UCSC.hg19)
+nc <- 4L
+nr <- 3L
+register(MulticoreParam(12L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distributions
+# NB: The alpha distributions are mostly less than one. 
+# Nevertheless, I will still seek to identify PMRs in all samples.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "chr1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], 
+                   " because a minimum number  of Cpgs satisfying the ", 
+                   "FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Hsapiens), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
+  partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
+  }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Hsapiens.UCSC.hg19))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Hsapiens.UCSC.hg19", unload = TRUE)
+```
+
+## Lister
+
+```{r}
+dataset <- "Lister"
+library(BSgenome.Hsapiens.UCSC.hg18)
+nc <- 5L
+nr <- 4L
+register(MulticoreParam(17L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distributions
+# NB: Somatic cell lines have bimodal alpha distribution with heavy right tail. 
+# Other cell lines have a much lighter right tail.
+# Nevertheless, I will still seek to identify PMRs in all samples.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "chr1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], " because a minimum number ", 
+                   "of Cpgs satisfying the FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Drop chrL
+l_msrgr <- bplapply(l_msrgr, function(msrgr) {
+  dropSeqlevels(msrgr, "chrL")
+  })
+l_pmrs <- bplapply(l_pmrs, function(pmrs) {
+  dropSeqlevels(pmrs, "chrL")
+  })
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Hsapiens), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+rm(l_sul)
+
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
+  partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
+  }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Hsapiens.UCSC.hg18))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Hsapiens.UCSC.hg18", unload = TRUE)
+```
+
+## Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+library(BSgenome.Mmusculus.UCSC.mm10)
+seqlevelsStyle(Mmusculus) <- 'NCBI'
+nc <- 3L
+nr <- 1L
+register(MulticoreParam(3L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distributions
+# The E16.5_male_1 alpha distribution is bimodal with a very heavy right tail.
+# The E6.5_epiblast_1 alpha distribution is a multimodal/uniform mess.
+# The J1_1 alpha distribution is unimodal with most values less than 1.
+# Nevertheless, I will still seek to identify PMRs in all samples.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], " because a minimum number ", 
+                   "of Cpgs satisfying the FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Mmusculus), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
+  partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
+  }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqlevelsStyle(seqinfo) <- "NCBI"
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Mmusculus.UCSC.mm10))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Mmusculus.UCSC.mm10", unload = TRUE)
+```
+
+## Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+library(BSgenome.Hsapiens.UCSC.hg19)
+nc <- 3L
+nr <- 3L
+register(MulticoreParam(8L))
+
+# Read in data as a MethPat object
+# NB: Variants have already been removed from these data
+methpat <- readRDS(paste0("../processed_data/", gsub("_merged", "", dataset), 
+                          "/", dataset, "_1_tuples_strand_collapsed.rds"))
+# Coerce MethPat object to a list of MethylSeekRGR objects
+l_msrgr <- bplapply(colnames(methpat), function(sn, methpat) {
+  as(methpat[, sn], "MethylSeekRGR")
+  }, methpat = methpat)
+names(l_msrgr) <- colnames(methpat)
+rm(methpat)
+# Sort samples in alphabetical order, which is the order of samples in other 
+# plots in my thesis.
+l_msrgr <- l_msrgr[sort(names(l_msrgr))]
+
+# Plot alpha distribution
+# The colon tumour, colon primary and cell line samples' alpha distributions 
+# have a fairly heavy right tail. The cortex samples' alpha distributions are
+# unimodal and mostly less than one.
+alpha_distribution_dir <- paste0("pdf/", dataset, "/alpha_distribution/")
+dir.create(alpha_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(msrgr, chr.sel, plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(alpha_distribution_dir, dataset, "_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+
+# Identify PMRs
+emission_distribution_dir <- paste0("pdf/", dataset, "/emission_distribution/")
+dir.create(emission_distribution_dir, recursive = TRUE)
+p <- bplapply(l_msrgr, function(msrgr, chr.sel) {
+  methsim:::segmentPMDs(m = msrgr, chr.sel = chr.sel, 
+                        seqLengths = seqlengths(msrgr), plot = FALSE)
+  }, chr.sel = "chr1")
+pdf(file = paste0(emission_distribution_dir, dataset, 
+                  "_emission_distributions.pdf"), height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p$hist, main = sn, freq = FALSE)
+  lines(p$x, p$lines1, type = "l", col = "red")
+  lines(p$x, p$lines2, type = "l", col = "green")
+  }, p = p, sn = names(p))
+dev.off()
+l_pmrs <- lapply(p, "[[", "segments")
+rm(p)
+p <- bpmapply(function(msrgr, pmrs, chr.sel) {
+  methsim:::plotAlphaDistributionOneChr(
+    subsetByOverlaps(msrgr, pmrs[mcols(pmrs)$type == "notPMD"]), chr.sel, 
+    plot = FALSE)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, MoreArgs = list(chr.sel = "chr1"), 
+              SIMPLIFY = FALSE)
+pdf(file = paste0(alpha_distribution_dir, dataset, 
+                  "_PMR_alpha_distributions.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+mapply(function(p, sn) {
+  plot(p, main = sn)
+  }, p = p, sn = names(p))
+dev.off()
+rm(p)
+pmr_segmentation_dir <- paste0("pdf/", dataset, "/PMR_segmentation/")
+dir.create(pmr_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, pmrs, sn) {
+  plotPMDSegmentation(m = msrgr, segs = pmrs, 
+                      pdfFilename = paste0(pmr_segmentation_dir, sn, 
+                                           "_PMRs.pdf"))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr))
+
+# Estimate FDRs and cutoffs
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+cgi <- keepSeqlevels(cgi, seqlevels(l_msrgr[[1]]))
+seqinfo(cgi) <- seqinfo(l_msrgr[[1]])
+cgi <- sort(cgi)
+cgi <- trim(resize(cgi, 5000, fix = "center"))
+fdr_dir <- paste0("pdf/", dataset, "/FDRs/")
+dir.create(fdr_dir, recursive = TRUE)
+l_fdrs <- bpmapply(function(msrgr, pmrs, sn, cgi) {
+  methsim:::calculateFDRs(m = msrgr, sn = sn, CGIs = cgi, PMDs = pmrs, 
+                          pdfFilename = paste0(fdr_dir, sn, "_FDRs.pdf"),
+                          num.cores = 1)
+  }, msrgr = l_msrgr, pmrs = l_pmrs, sn = names(l_msrgr), 
+                   MoreArgs = list(cgi = cgi), SIMPLIFY = FALSE)
+fdr_cutoff <- 5 
+methylation_cutoff <- 0.5
+l_minimum_number_cpgs <- bplapply(l_fdrs, function(fdrs, fdr_cutoff, 
+                                                   methylation_cutoff) {
+  as.integer(
+    names(fdrs$FDRs[as.character(methylation_cutoff), ]
+          [fdrs$FDRs[as.character(methylation_cutoff), ] < fdr_cutoff])[1])
+  }, fdr_cutoff = fdr_cutoff, methylation_cutoff = methylation_cutoff)
+
+bad_samples <- is.na(unlist(l_minimum_number_cpgs))
+if (any(bad_samples)) {
+  for (bs in which(bad_samples)) {
+    warning(paste0("Removing ", names(l_msrgr)[bs], " because a minimum number ", 
+                   "of Cpgs satisfying the FDR-cutoff cannot be found."))
+    }
+  l_msrgr <- l_msrgr[!bad_samples]
+  l_pmrs <- l_pmrs[!bad_samples]
+  l_minimum_number_cpgs <- l_minimum_number_cpgs[!bad_samples]
+  }
+
+# Identify UMRs and LMRs
+l_sul <- bpmapply(function(msrgr, methylation_cutoff, 
+                           minimum_number_cpgs, pmrs, bsgenome) {
+  methsim:::segmentUMRsLMRs(m = msrgr, meth.cutoff = methylation_cutoff,
+                            nCpG.cutoff = minimum_number_cpgs, PMDs = pmrs, 
+                            myGenomeSeq = bsgenome, 
+                            seqLengths = seqlengths(bsgenome))
+  }, msrgr = l_msrgr, pmrs = l_pmrs, 
+                  minimum_number_cpgs = l_minimum_number_cpgs,
+                  MoreArgs = list(methylation_cutoff = methylation_cutoff, 
+                                  bsgenome = Hsapiens), SIMPLIFY = FALSE)
+umrs_lmrs_dir <- paste0("pdf/", dataset, "/UMRs_LMRs/")
+dir.create(umrs_lmrs_dir, recursive = TRUE)
+pdf(file = paste0(umrs_lmrs_dir, dataset, 
+                  "_UMRs_LMRs_smoothScatter.pdf"), 
+    height = 9, width = 16)
+par(mfcol = c(nr, nc))
+l_umrs_lmrs <- mapply(function(sul, sn) {
+  smoothScatter(sul[["x"]], sul[["y"]], colramp = sul[["colramp"]], 
+                xlab = sul[["xlab"]], ylab = sul[["ylab"]], main = sn, 
+                xlim = c(0, 16), ylim = c(0, 60))
+  abline(v = sul[["v"]], lty = 5)
+  sul[["segments.gr"]]
+  }, sul = l_sul, sn = names(l_sul))
+dev.off()
+# Final segmentation
+final_segmentation_dir <- paste0("pdf/", dataset, "/final_segmentation/")
+dir.create(final_segmentation_dir, recursive = TRUE)
+bpmapply(function(msrgr, sn, umrs_lmrs, pmrs, methylation_cutoff) {
+  pdf(paste0(final_segmentation_dir, sn, "_final_segmentation.pdf"), 
+      height = 9, width = 16)
+  methsim:::plotFinalSegmentation(m = msrgr, sn = sn, segs = umrs_lmrs, 
+                                  PMDs = pmrs, meth.cutoff = methylation_cutoff)
+  dev.off()
+  }, msrgr = l_msrgr, sn = names(l_msrgr), umrs_lmrs = l_umrs_lmrs, 
+         pmrs = l_pmrs, 
+         MoreArgs = list(methylation_cutoff = methylation_cutoff))
+l_pm <- bpmapply(function(umrs_lmrs, pmrs) {
+  partitionMethylome(umrs_lmrs = umrs_lmrs, pmrs = pmrs)
+  }, umrs_lmrs = l_umrs_lmrs, pmrs = l_pmrs)
+# Add the relevant seqinfo to each PartitionedMethylome object and only retain
+# the "standard" chromosomes.
+l_pm <- lapply(l_pm, function(pm, seqinfo) {
+  seqinfo(pm) <- seqinfo
+  keepStandardChromosomes(pm)
+}, seqinfo = seqinfo(BSgenome.Hsapiens.UCSC.hg19))
+partioned_methylome_rds_dir <- paste0("rds/", dataset, "/PartitionedMethylome/")
+dir.create(partioned_methylome_rds_dir, recursive = TRUE)
+saveRDS(l_pm, file = paste0(partioned_methylome_rds_dir, dataset, "_pm.rds"))
+
+detach("package:BSgenome.Hsapiens.UCSC.hg19", unload = TRUE)
+```
+
+# Helper functions
+
+These are helper functions used in this script. Versions of these functions may 
+eventually end up in the `methsim` package.
+
+```{r}
+process_one_tuples <- function(dataset, seqlevels, min_cov) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_1_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Compute beta-values and annotate by region type
+  beta <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, 
+                                         seqlevels) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::methLevel()
+    val <- funByPM(FUN = MethylationTuples::methLevel, pm = pm, 
+                   methpat = methpat, min_cov = min_cov)
+    # Add information not returned by methLevel()
+    val[, sample := sn]
+    setnames(val, c("beta", "type", "sample"))
+    setkeyv(val, c("sample", "type", "beta"))
+    val
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels)
+  beta <- rbindlist(beta)
+  # Tabulate frequency of each beta-value by sample and type.
+  beta[, .N, by = list(sample, type, beta)]
+}
+```
+
+```{r}
+process_two_tuples <- function(dataset, seqlevels, min_cov) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_2_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Compute beta-values and annotate by region type
+  lor <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, seqlevels,  
+                                        method, offset) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::cometh()
+    funByPM(MethylationTuples::cometh, pm = pm, methpat = methpat, 
+            min_cov = min_cov, method = method, offset = offset)
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels, 
+    method = "lor", offset = 0.5)
+  lor <- rbindlist(lor)
+  # NOTE: This ignores strand.
+  lor_reduced <- lor[, IPD := pos2 - pos1][
+    , list(IPD, sample, type, statistic)][
+      , .N, by = list(sample, IPD, type, statistic)]
+  setorder(lor_reduced, sample, IPD, type, -N)
+  lor_reduced
+}
+```
+
+```{r}
+process_three_tuples <- function(dataset, seqlevels, min_cov) {
+  
+  if (missing(seqlevels)) {
+    stop("Must supply 'seqlevels'.")
+  }
+  
+  # Read in data
+  methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                            "_3_tuples_strand_collapsed.rds"))
+  l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+  
+  # Estimate the relative frequencies of methylation patterns at m-tuples
+  pattern_freqs <- bplapply(names(l_pm), function(sn, methpat, l_pm, min_cov, 
+                                                  seqlevels) {
+    pm <- l_pm[[sn]]
+    # Only want data on sample 'sn'.
+    methpat <- methpat[, sn]
+    # Retain only the relevant seqlevels.
+    methpat <- keepSeqlevels(methpat, seqlevels)
+    # Apply MethylationTuples::patternFreqs()
+    funByPM(MethylationTuples::patternFreqs, pm = pm, methpat = methpat, 
+            min_cov = min_cov)
+    }, methpat = methpat, l_pm = l_pm, min_cov = min_cov, seqlevels = seqlevels)
+  pattern_freqs <- rbindlist(pattern_freqs)
+  grp <- c("sample", "type", grep("^w[0-9]", colnames(pattern_freqs), 
+                                  value = TRUE))
+  pattern_freqs_reduced <- pattern_freqs[, .N, by = grp]
+  setorder(pattern_freqs_reduced, sample, type, -N)
+  pattern_freqs_reduced
+}
+```
+
+## Long term TODOs
+
+These issues came up when writing the above helper functions:
+
+- Why can't I pass `FUN = functionName` to the top-level `bplapply()` function?
+- Find a neater way to split MethPat object by sample than what I use in the 
+above. More specifically, devise a neat way to split a `SummarizedExperiment` 
+by column (sample).
+
+# Compute summary statistics stratified by partition types
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+register(MulticoreParam(12L))
+autosomes <- paste0('chr', 1:22)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+## Lister
+
+```{r}
+dataset <- "Lister"
+register(MulticoreParam(17L))
+autosomes <- paste0('chr', 1:22)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+## Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+register(MulticoreParam(3L))
+autosomes <- as.character(1:19)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+## Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+register(MulticoreParam(8L))
+autosomes <- paste0('chr', 1:22)
+```
+
+```{r}
+beta_reduced <- process_one_tuples(dataset = dataset, seqlevels = autosomes, 
+                                   min_cov = 10L)
+# Save beta_reduced as .rds 
+beta_by_pm_region_dir <- paste0("rds/", dataset, "/beta_by_pm_region/")
+dir.create(beta_by_pm_region_dir, recursive = TRUE)
+saveRDS(beta_reduced, file = paste0(beta_by_pm_region_dir, dataset, 
+                                    "_beta_by_pm_region.rds"))
+rm(beta_reduced)
+```
+
+```{r}
+lor_reduced <- process_two_tuples(dataset = dataset, seqlevels = autosomes,
+                                  min_cov = 10L)
+# Save lor_reduced as .rds 
+lor_by_pm_region_dir <- paste0("rds/", dataset, "/lor_by_pm_region/")
+dir.create(lor_by_pm_region_dir, recursive = TRUE)
+saveRDS(lor_reduced, file = paste0(lor_by_pm_region_dir, dataset, 
+                                   "_lor_by_pm_region.rds"))
+rm(lor_reduced)
+```
+
+```{r}
+pattern_freqs_reduced <- process_three_tuples(dataset = dataset, 
+                                              seqlevels = autosomes,
+                                              min_cov = 5L)
+# Save pattern_freqs_reduced as .rds 
+pattern_freqs_by_pm_region_dir <- paste0("rds/", dataset, 
+                                         "/pattern_freqs_by_pm_region/")
+dir.create(pattern_freqs_by_pm_region_dir, recursive = TRUE)
+saveRDS(pattern_freqs_reduced, 
+        file = paste0(pattern_freqs_by_pm_region_dir, dataset, 
+                                   "_pattern_freqs_by_pm_region.rds"))
+rm(pattern_freqs_reduced)
+```
+
+```{r}
+rm(dataset, autosomes)
+```
+
+# Plots
+
+```{r}
+thesis_theme <- theme_bw(base_size = 20)
+```
+
+## Helper functions
+
+These are helper functions used in this section. Versions of these functions may 
+eventually end up in the `methsim` or `MethylationTuples` packages.
+
+```{r}
+# A wrapper to boxplot.stats() designed for use with data.table objects where 
+# observations are already aggregated into "table" form.
+bps <- function(value, times) {
+  unlist(boxplot.stats(rep(value, times = times), do.out = FALSE))
+}
+
+# A function to plot a boxplot of beta values by region type.
+betaBoxPlot <- function(beta_reduced, dataset, min_cov, ncol, nrow) {
+    
+  # Compute boxplot summary statistics
+  setkey(beta_reduced, sample, type)
+  beta_reduced <- beta_reduced[, as.list(bps(beta, N)), by = key(beta_reduced)]
+  
+  # If there is more than one sample then facet by 'sample' and use colour to 
+  # indicate 'type'.
+  if (beta_reduced[, length(unique(sample))] > 1L) {
+    
+    g <- ggplot(beta_reduced, aes(x = type, ymin = stats1, lower = stats2,
+                                  middle = stats3, upper = stats4, ymax = stats5, 
+                                  group = type, colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) + 
+      ylab(bquote(beta * "-value"))
+  } else {
+    # If there is only one 'sample' then use colour to indicate 'type'. No need
+    # for faceting.
+    g <- ggplot(beta_reduced, aes(x = type, ymin = stats1, lower = stats2,
+                                  middle = stats3, upper = stats4, ymax = stats5, 
+                                  group = type, colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) +
+      ylab(bquote(beta * "-value"))
+  }
+  g
+}
+
+# A function to plot the quantiles of the co-methylation distribution by region 
+# type.
+quantileLORPlot <- function(lor_reduced, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                            dataset, min_cov, xmax, ymin, ymax, pair_type, 
+                            ncol, nrow) {
+
+    # Compute quantiles
+  if (!identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9)) & 
+        !identical(probs, 0.5)) {
+    stop("'probs' must be 'c(0.1, 0.25, 0.5, 0.75, 0.9)' or 'c(0.5)'.")
+  }
+  q <- lor_reduced[, as.list(quantile(rep(statistic, N), probs, na.rm = TRUE)), 
+                   by = list(sample, IPD, type)]
+  
+  # If there is more than one sample then facet by 'sample' and use colour to 
+  # indicate 'type'.
+  if (lor_reduced[, length(unique(sample))] > 1L) {
+    g <- ggplot(aes(x = IPD, y = `50%`, colour = type, fill = type), data = q) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2") + 
+      ylab(bquote(atop(log[2]("odds ratio"),
+                       "Restricted to [" * .(ymin) * ", " * .(ymax) * "]"))) + 
+      geom_line(size = 1.5)
+    if (identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9))) {
+      g <- g + geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, 
+                           linetype = 0) + 
+        geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0)
+    }
+    g <- g + geom_hline(aes(yint = 0), linetype = 2) +
+      xlim(c(0, xmax)) +
+      coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
+      facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+      thesis_theme 
+    if (pair_type == "all") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    } else if (pair_type == "adjacent") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    }
+    if (xmax < max(lor_reduced[, IPD])) {
+      g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+    } else {
+      g <- g + xlab(label = "IPD (bp)")
+    }
+  } else {
+    # If there is only one 'sample' then facet by 'type' and also use colour to 
+    # indicate 'type'.
+    g <- ggplot(aes(x = IPD, y = `50%`, colour = type, fill = type, 
+                    group = type), data = q) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2") + 
+      ylab(bquote(atop(log[2]("odds ratio"),
+                       "Restricted to [" * .(ymin) * ", " * .(ymax) * "]"))) + 
+      geom_line(size = 1.5)
+    if (identical(probs, c(0.1, 0.25, 0.5, 0.75, 0.9))) {
+      g <- g + geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, 
+                           linetype = 0) + 
+        geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0)
+    }
+    g <- g + geom_hline(aes(yint = 0), linetype = 2) +
+      xlim(c(0, xmax)) +
+      coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
+      facet_wrap(~ type, ncol = 4L) + 
+      thesis_theme 
+    if (pair_type == "all") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    } else if (pair_type == "adjacent") {
+      g <- g +
+        ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                         .(min_cov) * " )"))
+    }
+    if (xmax < max(lor_reduced[, IPD])) {
+      g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+    } else {
+      g <- g + xlab(label = "IPD (bp)")
+    }
+  }
+  g
+}
+
+# A function to plot the frequencies of the haplotypes by region type.
+patternFreqsPlot <- function(pattern_freqs_reduced, dataset, min_cov, ncol, 
+                             nrow) {
+  
+  # Compute boxplot statistics
+  w_cn <- grep("^w[0-9]", colnames(pattern_freqs_reduced), value = TRUE)
+  setkey(pattern_freqs_reduced, sample, type)
+  parsed_w_cn <- parse(text = paste0(w_cn, "\n"))
+  x <- bplapply(parsed_w_cn, function(parsed_w_cn_, pattern_freqs_reduced) {
+    pattern_freqs_reduced[, as.list(bps(eval(parsed_w_cn_), N)), 
+                          by = key(pattern_freqs_reduced)][, 
+                                                           "w" := deparse(parsed_w_cn_)]
+    }, pattern_freqs_reduced = pattern_freqs_reduced)
+  x <- rbindlist(x)
+
+  # If there is more than one sample then facet by 'sample' and use colour to 
+  # indicate 'type'.
+  if (pattern_freqs_reduced[, length(unique(sample))] > 1L) {
+    g <- ggplot(x, aes(x = w, ymin = stats1, lower = stats2, middle = stats3,
+                       upper = stats4, ymax = stats5, 
+                       group = interaction(w, type), colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      facet_wrap(~ sample, ncol = ncol, nrow = nrow) +
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) +
+      scale_x_discrete(labels = 
+                         parse(text = paste0(substring(unique(sort(x[, w])), 1, 1), 
+                                             "[", 
+                                             substring(unique(sort(x[, w])), 2), 
+                                             "]\n")))
+  } else {
+    # If there is only one 'sample' then facet by 'type' and also use colour to 
+    # indicate 'type'.
+    g <- ggplot(x, aes(x = w, ymin = stats1, lower = stats2, middle = stats3,
+                       upper = stats4, ymax = stats5, 
+                       group = interaction(w, type), colour = type)) +
+      geom_boxplot(stat = "identity") + 
+      thesis_theme + 
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(paste0(dataset, ": min. coverage = ", min_cov)) + 
+      scale_x_discrete(labels = 
+                         parse(text = paste0(substring(unique(sort(x[, w])), 1, 1), 
+                                             "[", 
+                                             substring(unique(sort(x[, w])), 2), 
+                                             "]\n")))
+  }
+  g
+}
+```
+
+### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+ncol <- 4
+nrow <- 3
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### Lister
+
+```{r}
+dataset <- "Lister"
+ncol <- 5
+nrow <- 4
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+ncol <- 3
+nrow <- 1
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = dataset, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+ncol <- 3
+nrow <- 3
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+g <- betaBoxPlot(beta_reduced = beta_reduced, 
+                 dataset = gsub("_merged", "", dataset), min_cov = min_cov, 
+                 ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, dataset, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = dataset, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, dataset,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = dataset, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, dataset,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+### ADS
+
+Create the above plots `betaBoxPlot()`, `quantileLORPlot()` and `patternFreqsPlot()` for just the _ADS_ sample.
+
+```{r}
+dataset <- "Lister"
+sample_name <- "ADS"
+ncol <- 1
+nrow <- 1
+
+# 1-tuples
+min_cov <- 10L
+beta_reduced <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                               "_beta_by_pm_region.rds"))
+beta_reduced <- beta_reduced[sample == sample_name, ]
+g <- betaBoxPlot(beta_reduced = beta_reduced, dataset = sample_name, 
+                 min_cov = min_cov, ncol = ncol, nrow = nrow)
+beta_by_pm_boxplots_dir <- paste0("pdf/", dataset, "/beta_by_pm_boxplots/")
+dir.create(beta_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(beta_by_pm_boxplots_dir, sample_name, "_beta_by_pm_boxplots.pdf"), g, 
+       height = 9, width = 16)
+rm(min_cov, beta_reduced, g)
+
+# 2-tuples
+min_cov <- 10L
+xmin <- 0
+xmax <- 250
+ymin <- -3
+ymax <- 7
+pair_type <- "adjacent"
+lor_reduced <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                              "_lor_by_pm_region.rds"))
+lor_reduced <- lor_reduced[sample == sample_name, ]
+g <- quantileLORPlot(lor_reduced = lor_reduced, 
+                     probs = c(0.1, 0.25, 0.5, 0.75, 0.9), dataset = sample_name, 
+                     min_cov = min_cov, xmax, ymin, ymax, pair_type, ncol, nrow)
+lor_by_pm_quantile_plots_dir <- paste0("pdf/", dataset, 
+                                 "/lor_by_pm_quantile_plots/")
+dir.create(lor_by_pm_quantile_plots_dir, recursive = TRUE)
+ggsave(paste0(lor_by_pm_quantile_plots_dir, sample_name,
+              "_lor_by_pm_quantile_plots.pdf"), g, height = 9, width = 16)
+rm(min_cov, xmin, xmax, ymin, ymax, pair_type, lor_reduced, g)
+
+# 3-tuples
+min_cov <- 5L
+pattern_freqs_reduced <- readRDS(paste0("rds/", dataset, 
+                                        "/pattern_freqs_by_pm_region/", dataset, 
+                                        "_pattern_freqs_by_pm_region.rds"))
+pattern_freqs_reduced <- pattern_freqs_reduced[sample == sample_name, ]
+g <- patternFreqsPlot(pattern_freqs_reduced = pattern_freqs_reduced, 
+                      dataset = sample_name, min_cov = min_cov, ncol = ncol, 
+                      nrow = nrow)
+pattern_freqs_by_pm_boxplots_dir <- paste0(
+  "pdf/", dataset, "/pattern_freqs_by_pm_boxplots/")
+dir.create(pattern_freqs_by_pm_boxplots_dir, recursive = TRUE)
+ggsave(paste0(pattern_freqs_by_pm_boxplots_dir, sample_name,
+              "_pattern_freqs_by_pm_boxplots.pdf"), g, height = 9, 
+       width = 16)
+rm(min_cov, pattern_freqs_reduced, g)
+```
+
+# Session info
+
+```{r}
+devtools::session_info()
+```

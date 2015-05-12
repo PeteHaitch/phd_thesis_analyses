@@ -1,0 +1,66 @@
+---
+title: "Creating `SimulateMethylomeParam` objects"
+author: "Peter Hickey"
+date: "29/03/2015"
+output: html_document
+---
+
+# Preliminaries
+
+```{r}
+library(methsim)
+library(devtools)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+# TODOs
+
+- Need to address the TODOs of simulate,SimulateMethylomeParam-method before this can proceed
+
+# Create `SimulateMethylomeParam` objects
+
+Set seed for reproducibility:
+
+```{r}
+set.seed(666)
+```
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+library(BSgenome.Hsapiens.UCSC.hg19)
+
+# Load data
+l_pm <- readRDS(paste0("rds/", dataset, "/PartitionedMethylome/", dataset, 
+                       "_pm.rds"))
+meth_level <- readRDS(paste0("rds/", dataset, "/beta_by_pm_region/", dataset, 
+                             "_beta_by_pm_region.rds"))
+cometh <- readRDS(paste0("rds/", dataset, "/lor_by_pm_region/", dataset, 
+                         "_lor_by_pm_region.rds"))
+pattern_freqs <- readRDS(paste0("rds/", dataset, 
+                                "/pattern_freqs_by_pm_region/", dataset, 
+                                "_pattern_freqs_by_pm_region.rds"))
+l_smp <- lapply(names(l_pm), function(sample_name, bsgenome, 
+                                      l_pm, meth_level, 
+                                      cometh, pattern_freqs) {
+  meth_level <- meth_level[sample == sample_name, ][, sample := NULL]
+  cometh <- cometh[sample == sample_name, ][, sample := NULL]
+  pattern_freqs <- pattern_freqs[sample == sample_name][, sample := NULL]
+  SimulateMethylomeParam(BSgenome = bsgenome, 
+                         PartitionedMethylome = l_pm[[sample_name]],
+                         MethLevelDT = meth_level,
+                         ComethDT = cometh,
+                         PatternFreqsDT = pattern_freqs,
+                         SampleName = sample_name)
+  }, bsgenome = Hsapiens, l_pm = l_pm, meth_level = meth_level, 
+  cometh = cometh, pattern_freqs = pattern_freqs)
+
+# TODO: sample,SimulateMethylomeParam-method
+```
+
+# Session info
+
+```{r}
+devtools::session_info()
+```
