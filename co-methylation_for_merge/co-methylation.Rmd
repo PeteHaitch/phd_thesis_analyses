@@ -1,0 +1,4096 @@
+---
+title: "Supplementary Material for Co-methylation"
+author: "Peter Hickey"
+date: "Modified: 23 April 2015. Compiled: `r format(Sys.Date(), '%d %b %Y')`"
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 16, fig.height = 9, fig.path = 'figures', dev = c('png', 'pdf'))
+```
+
+# Preliminaries
+
+```{r}
+library(MethylationTuples)
+library(ggplot2)
+library(data.table)
+thesis_theme <- theme_bw(base_size = 20)
+library(Rcpp)
+```
+
+# CpGs in the reference genomes
+
+```{r}
+library(BSgenome.Hsapiens.UCSC.hg18)
+cpgs <- findMTuples(BSgenome.Hsapiens.UCSC.hg18, 
+                    MethInfo(methtype = "CG"), size = 1L)
+detach("package:BSgenome.Hsapiens.UCSC.hg18", unload = TRUE)
+saveRDS(cpgs, file = "cpgs_hg18.rds", compress = "xz")
+library(BSgenome.Hsapiens.UCSC.hg19)
+cpgs <- findMTuples(BSgenome.Hsapiens.UCSC.hg19, 
+                    MethInfo(methtype = "CG"), size = 1L)
+saveRDS(cpgs, file = "cpgs_hg19.rds", compress = "xz")
+detach("package:BSgenome.Hsapiens.UCSC.hg19", unload = TRUE)
+library(BSgenome.Mmusculus.UCSC.mm10)
+cpgs <- findMTuples(BSgenome.Mmusculus.UCSC.mm10, 
+                    MethInfo(methtype = "CG"), size = 1L)
+seqlevelsStyle(cpgs) <- "NCBI"
+saveRDS(cpgs, file = "cpgs_mm10.rds", compress = "xz")
+detach("package:BSgenome.Mmusculus.UCSC.mm10", unload = TRUE)
+```
+
+# CpG pairs in the reference genomes
+
+```{r}
+library(BSgenome.Hsapiens.UCSC.hg18)
+cpg_pairs <- findMTuples(BSgenome.Hsapiens.UCSC.hg18, 
+                         MethInfo(methtype = "CG"), size = 2L)
+saveRDS(cpg_pairs, file = "cpg_pairs_hg18.rds", compress = "xz")
+detach("package:BSgenome.Hsapiens.UCSC.hg18", unload = TRUE)
+library(BSgenome.Hsapiens.UCSC.hg19)
+cpg_pairs <- findMTuples(BSgenome.Hsapiens.UCSC.hg19, 
+                         MethInfo(methtype = "CG"), size = 2L)
+saveRDS(cpg_pairs, file = "cpg_pairs_hg19.rds", compress = "xz")
+detach("package:BSgenome.Hsapiens.UCSC.hg19", unload = TRUE)
+library(BSgenome.Mmusculus.UCSC.mm10)
+cpg_pairs <- findMTuples(BSgenome.Mmusculus.UCSC.mm10, 
+                         MethInfo(methtype = "CG"), size = 2L)
+seqlevelsStyle(cpg_pairs) <- "NCBI"
+saveRDS(cpg_pairs, file = "cpg_pairs_mm10.rds")
+detach("package:BSgenome.Mmusculus.UCSC.mm10", unload = TRUE)
+```
+
+# Mantel-Haenszel estimation of within-fragment co-methylation
+
+## Simulation study 
+
+### Helper functions
+
+```{r}
+# Requires the installation of mipfp
+library(mipfp)
+
+# rtpois is a helper function to simulate n truncated Poisson(lambda) RVs with
+# truncation specified by 'trunc'.
+# It is adapted from a method for simulating zero-truncated Poisson suggested
+# by Peter Dalgaard https://stat.ethz.ch/pipermail/r-help/2005-May/070680.html
+rtpois <- function(n, lambda, trunc) {
+  qpois(runif(n, ppois(trunc, lambda), 1), lambda)
+}
+
+# rtnbinom is a helper function to simulate n truncated NB(mu, size) RVs with
+# truncation specified by 'trunc'. It uses a more explicit approach to simulate 
+# truncated RVs han rtpois() because the same trick doesn't immediately work
+# for NB-distributed RVs.
+rtnbinom <- function(n, mu = 30, size = 10, trunc = 9) {
+  x <- rnbinom(n, size = size, mu = mu)
+  i <- x <= trunc
+  while (any(i)) {
+    x[i] <- rnbinom(sum(i), size = size, mu = mu)
+    i <- x <= trunc
+  }
+  x
+}
+
+# Function to simulate 2x2xK tables.
+# Each 2x2 table represents the counts of unmethylated (0) and methylated (1) 
+# states at each CpG for each read.
+# The number of reads per table (i.e., 2x2 table sample size) is simulated
+# from a truncated NB(mu, size) distribution; truncation is to simulate
+# minimum coverage cutoffs and is specified by the 'trunc' argument.
+# The marginal probabilities of each table are p1 = Prob(methylated at first 
+# CpG) and p2 = Prob(methylated at second CpG) and should be of length K or 1 (
+# in which case all K tables have the same p1 and/or p2).
+# The odds ratio (or) is for each 2x2 table and should be of length K or 1 (in
+# which case all K tables have the same odds ratio).
+simTables <- function(K, mu, size, trunc, p1, p2, or) {
+
+  # d is the sample size of each 2x2 table (i.e, the sequencing depth for the 2-tuple)
+  d <- rtnbinom(n = K, mu = mu, size = size, trunc = trunc)
+  if (length(p1) == 1L) {
+    p1 <- rep(p1, K)
+  }
+  if (length(p2) == 1L) {
+    p2 <- rep(p2, K)
+  }
+  if (length(or) == 1L) {
+    or <- rep(or, K)
+  }
+  .simTables <- function(k, d, p1, p2, or) {
+    # Compute joint probabilities
+    P <- mipfp::Ipfp(seed = matrix(c(or, 1, 1, 1), ncol = 2),
+                     target.list = list(1, 2),
+                     target.data = list(c(1 - p1, p1), c(1 - p2, p2)))$x.hat
+    matrix(rmultinom(1, d, as.vector(P)), ncol = 2)
+  }
+  mapply(.simTables, k = K, d = d, p1 = p1, p2 = p2, or = or, SIMPLIFY = "array")
+}
+
+# Estimator of the (offset-adjusted) unconditional odds ratios of K 2x2 tables
+OR <- function(x, offset = 0.5) {
+  x <- x + offset
+  MM <- x[2, 2, ]
+  MU <- x[2, 1, ]
+  UM <- x[1, 2, ]
+  UU <- x[1, 1, ]
+  # Compute on the log scale to avoid overflow
+  lor <- log(MM) + log(UU) - log(MU) - log(UM)
+  log_ase2 <- 1 / MM + 1 / MU + 1 / UM + 1 / UU
+  ci <- c(exp(lor - qnorm(0.975) * sqrt(log_ase2)), 
+          exp(lor + qnorm(0.975) * sqrt(log_ase2))) 
+  list(estimate = exp(lor), conf.int = ci)
+}
+
+# Mantel-Haenszel estimator of a common log odds ratio of a 2x2xK table
+# Also estimates 95% CI.
+MH <- function(x, offset = 0) {
+  x <- x + offset
+  MM <- x[2, 2, ]
+  MU <- x[2, 1, ]
+  UM <- x[1, 2, ]
+  UU <- x[1, 1, ]
+  d <- apply(x, 3, sum)
+  or <- sum((UU * MM) / d) / sum((MU * UM) / d)
+  # One or more margins must be identically zero so add offset
+  if (is.nan(or) | isTRUE(all.equal(or, 0)) | is.infinite(or)) {
+    warning("One or more cell is (probably) identically zero in all K 2x2 tables. Adding offset = 0.5")
+    MH(x, 0.5)
+  } else {
+    log_ase2 <- sum((UU + MM) * (UU * MM) / (d ^ 2)) / (2 * (sum(UU * MM / d)) ^ 2) +
+      sum(((UU + MM) * (MU * UM) + (UM + MU) * (UU * MM)) / d ^ 2) /
+      (2 * sum(UU * MM / d) * sum(MU * UM / d)) +
+      sum((UM + MU) * (UM * MU) / (d ^ 2)) / (2 * (sum(UM * MU / d)) ^ 2)
+    ci <- c(exp(log(or) - qnorm(0.975) * sqrt(log_ase2)), 
+            exp(log(or) + qnorm(0.975) * sqrt(log_ase2)))
+    list(estimate = or, conf.int = ci)
+  }
+}
+
+# Estimator of the (offset-adjusted) unconditional odds ratio of the
+# 2x2xK collapsed over K.
+ORCollapsed <- function(x, offset = 0.5) {
+  z <- apply(x, c(1, 2), sum)
+  # Artificially augment so it's a 2x2x1 table
+  dim(z) <- c(dim(z), 1)
+  or <- OR(z, 0)
+  if (is.nan(or$estimate) | is.infinite(or$estimate)) {
+    warning("One or more cell is (probably) identically zero in all K 2x2 tables. Adding offset = 0.5")
+    OR(z, 0.5)
+  } else {
+    or
+  }
+}
+
+op <- par()
+# par(mfrow = c(3, 3), cex.main = 2.3, cex.lab = 1.9, cex.axis = 1.7, 
+#     mar = c(4.5, 6, 5.5, 1) + 0.1, mgp = c(3, 1, 0))
+# par(mfrow = c(3, 3), mar = c(4.5, 6, 5.5, 1) + 0.1)
+par(mfrow = c(3, 3), mar = c(5, 5, 5.5, 0) + 0.1)
+```
+
+### Simulation 1
+
+All estimators struggle when marginal probabilities are consistently near the boundaries. MH and common OR are almost equivalent. Raw ORs are bad estimates of the true odds ratio unless marginal probabilities are well away from the boundaries.
+
+```{r Simulation_1}
+# Simulate and plot data when p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 1, i.e., independence
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- 1
+p1 <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1[i], 
+                 p2 = p2[i], or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = ", p1), 
+                     list(p1 = p1[i]))
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1.2, cex.main = 2)
+```
+
+### Simulation 2
+
+Increasing $K$ to $K = 1000$ helps, although CIs are still wider than we might like.
+
+```{r Simulation_2}
+# Simulate and plot data when p1 = p2.
+# 1000 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 1, i.e., independence
+set.seed(666)
+K <- 1000
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- 1
+p1 <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1[i], 
+                 p2 = p2[i], or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = ", p1), 
+                     list(p1 = p1[i]))
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Simulation 2d
+
+Increasing the average sequencing depth to $10000 \times$ removes the skewness of $OR$ but cannot eliminate the variation when the marginal probabilities are near the boundaries.
+
+```{r Simulation_2d}
+# Simulate and plot data when p1 = p2.
+# 1000 CpG pairs, 10000x average coverage truncated at 10
+# odds ratio = 1, i.e., independence
+set.seed(666)
+K <- 1000
+mu <- 10000
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- 1
+p1 <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1[i], 
+                 p2 = p2[i], or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = ", p1), 
+                     list(p1 = p1[i]))
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Simulation 3
+
+MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
+
+```{r Simulation_3}
+# Simulate and plot data when p1 = U(0, 1), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 2^(-4), 2^(-3), ..., 2^(4).
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- exp(seq(-4, 4, 1))
+p1 <- runif(K)
+p2 <- runif(K)
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or[i])
+  main <- substitute(paste(pi["2+"], ", ", pi["+2"], " = U(0, 1)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or[i]), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Beta(0.3, 0.2)
+
+```{r beta_marginals}
+hist(rbeta(1000, 0.3, 0.2))
+```
+
+### Simulation 4
+
+MH estimator nails it. The odds ratio of the collapsed table is garbage, more so as the absolute value of the log odds ratio increases.
+
+```{r Simulation_4}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio = 2^(-4), 2^(-3), ..., 2^(4).
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or[i])
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(or[i]), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Simulation 5
+
+MH nails the location but greatly underestimates the variation.
+
+```{r Simulation_5}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio Gaussian distributed with mean =  2^(-4), 2^(-3), ..., 2^(4) and 
+# var = 1.
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  or <- exp(rnorm(K, log(or_mean[i]), 1))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Simulation 6
+
+Increasing $K$ to $K = 1000$ only makes the underestimation of variance by the MH estimator worse.
+
+```{r Simulation_6}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio Gaussian distributed with mean =  2^(-4), 2^(-3), ..., 2^(4) and 
+# var = 1.
+set.seed(666)
+K <- 1000
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  or <- exp(rnorm(K, log(or_mean[i]), 1))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Simulation 7
+
+MH estimator still gets the location approximately correct but underestimates the variance and can't account for the skewness.
+
+```{r Simulation_7}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio Skew-Gaussian(2^(-4), 2^(-3), ..., 2^(4), 1, -10) 
+library(sn)
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  or <- exp(rsn(K, log(or_mean[i]), 1, -10))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+### Simulation 8
+
+MH assumes symmetry, hence estimates in between the two modes. Obviously the MH variance estimator can't cope either.
+
+```{r Simulation_8}
+# Simulate and plot data when p1 = Beta(0.3, 0.2), p1 = p2.
+# 100 CpG pairs, 30x average coverage truncated at 10
+# odds ratio from  0.5 * Gaussian(2^(-4), 2^(-3), ..., 2^(4), 1) + 
+# 0.5 * Gaussian(-2^(-4), 2^(-3), ..., 2^(4), 1) mixture.
+set.seed(666)
+K <- 100
+mu <- 30
+size <- 10
+# trunc <- x means the minimum rtnbinom() is (x + 1)
+trunc <- 9
+or_mean <- exp(seq(-4, 4, 1))
+p1 <- rbeta(K, 0.3, 0.2)
+p2 <- p1
+for (i in 1:9) {
+  w <- sample(c(-1, 1), K, replace = TRUE)
+  or <- exp(rnorm(K, w * log(or_mean[i]), 1))
+  x <- simTables(K = K, mu = mu, size = size, trunc = trunc, p1 = p1, 
+                 p2 = p2, or = or)
+  main <- substitute(paste(pi["2+"], " = ", pi["+2"], " = Beta(0.3, 0.2)"), 
+                     list())
+  hist(log(OR(x)$estimate), 
+       main = main,
+       xlim = c(-10, 10), 
+       breaks = 20,
+       xlab = expression(theta),
+       freq = FALSE,
+       cex.axis = 2,
+       cex.main = 2,
+       cex.lab = 2)
+  orc <- ORCollapsed(x)
+  abline(v = log(orc$estimate), col = "orange", lwd = 3)
+  abline(v = log(orc$conf.int[1]), col = "orange", lwd = 3, lty = 3)
+  abline(v = log(orc$conf.int[2]), col = "orange", lwd = 3, lty = 3)
+  mh <- MH(x)
+  abline(v = log(mh$estimate), col = "dodgerBlue", lwd = 3)
+  abline(v = log(mh$conf.int[1]), col = "dodgerBlue", lwd = 3, lty = 3)
+  abline(v = log(mh$conf.int[2]), col = "dodgerBlue", lwd = 3, lty = 3)
+  lines(density(log(or)), col = "black", lty = 2, lwd = 2)
+}
+title <- substitute(paste("K = ", K, ", ", mu, " = ", mu_, ", size = ", size, 
+                          ", trunc = ", trunc), 
+                    list(K = K, mu_ = mu, size = size, trunc = trunc))
+title(title, outer = TRUE, line = -1, cex.main = 2)
+```
+
+
+```{r}
+par(op)
+```
+
+## Analysis of datasets
+
+```{r}
+library(BiocParallel)
+BPPARAM <- MulticoreParam(17)
+```
+
+### Computations
+
+#### EPISCOPE
+
+```{r}
+# Load data
+dataset <- "EPISCOPE"
+cpg_pairs <- readRDS("cpg_pairs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+#### Lister
+
+```{r}
+# Load data
+dataset <- "Lister"
+cpg_pairs <- readRDS("cpg_pairs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+# Drop chrL which isn't a human seqlevel
+methpat <- dropSeqlevels(methpat, "chrL")
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+#### Seisenberger
+
+```{r}
+# Load data
+dataset <- "Seisenberger"
+cpg_pairs <- readRDS("cpg_pairs_mm10.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+#### Ziller
+
+```{r}
+# Load data
+dataset <- "Ziller_merged"
+cpg_pairs <- readRDS("cpg_pairs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, paste0(dataset, "_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames.rds"))
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cpg_pairs)
+# NIL >= 0, strand-collapsed.
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Various MH estimates
+mh_by_ipd <- mantelhaen(methpat, key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd, paste0(dataset, "_ac_mh_by_ipd.rds"))
+rm(mh_by_ipd)
+mh_by_ipd_seqnames <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = NULL, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames, paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+rm(mh_by_ipd_seqnames)
+mh_by_ipd_seqnames_200 <- mantelhaen(methpat, key = c("IPD", "seqnames"), 
+                                 K = 200, BPPARAM = BPPARAM)
+mh_by_ipd_seqnames_200 <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = mh_by_ipd_seqnames_200, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_mh_by_ipd_seqnames_200.rds"))
+rm(mh_by_ipd_seqnames_200)
+### Stratify CpGs as inside (pair_feature_status = 2) or outside 
+### (pair_feature_status = 0) CpG islands.
+feature <- cgi
+rd_start <- GRanges(seqnames(methpat), IRanges(start(methpat), width = 1L), 
+                    strand(methpat), seqinfo = seqinfo(methpat))
+rd_end <- GRanges(seqnames(methpat), IRanges(end(methpat), width = 1L), 
+                  strand(methpat), seqinfo = seqinfo(methpat))
+pair_feature_status <- Rle(overlapsAny(rd_start, feature) + 
+                             overlapsAny(rd_end, feature))
+### Inside CGI
+in_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = in_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd, paste0(dataset, "_ac_in_cgi_mh_by_ipd.rds"))
+rm(in_cgi_mh_by_ipd)
+in_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames.rds"))
+rm(in_cgi_mh_by_ipd_seqnames)
+in_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 2, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+in_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = in_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(in_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_ac_in_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(in_cgi_mh_by_ipd_seqnames_200)
+### Outside CGI
+out_cgi_mh_by_ipd <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD"), K = NULL, BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd <- rbindlist(mapply(function(dt, sn) dt[, sampleName := sn], 
+                              dt = out_cgi_mh_by_ipd, 
+                              sn = colnames(methpat), 
+                              SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd, paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+
+rm(out_cgi_mh_by_ipd)
+out_cgi_mh_by_ipd_seqnames <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = NULL,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames, 
+        paste0(dataset, "_ac_out_cgi_mh_by_ipd_seqnames.rds"))
+
+rm(out_cgi_mh_by_ipd_seqnames)
+out_cgi_mh_by_ipd_seqnames_200 <- mantelhaen(methpat[pair_feature_status == 0, ], 
+                               key = c("IPD", "seqnames"), K = 200,
+                               BPPARAM = BPPARAM)
+out_cgi_mh_by_ipd_seqnames_200 <- rbindlist(
+  mapply(function(dt, sn) dt[, sampleName := sn], 
+         dt = out_cgi_mh_by_ipd_seqnames_200, 
+         sn = colnames(methpat), 
+         SIMPLIFY = FALSE))
+saveRDS(out_cgi_mh_by_ipd_seqnames_200, 
+        paste0(dataset, "_out_cgi_mh_by_ipd_seqnames_200.rds"))
+rm(out_cgi_mh_by_ipd_seqnames_200)
+rm(methpat, cgi)
+```
+
+### Plots
+
+We plot genome-level and chromosome-level estimates of $\widehat{\theta}_{MH}$. We see some autosomal $\widehat{\theta}_{MH}$ that are separated from the majority of autosomal estimates. Some detective work revealed that these seem to occur on chromosome 21. At this point I have no idea what is causing this signal, but I document it for interests sake.
+
+#### Functions
+
+```{r}
+# TODO: Perhaps rotate x-tick labels.
+plotMH <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, xmax, 
+                   pair_type, annotate = TRUE, seqlevels = NULL) {
+  
+  # A hack to annotate chromosome as autosome, X, Y or mtDNA
+  uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
+  chromosome <- vector("character", length(uniq_seqnames))
+  autosomes <- grep("[0-9]", uniq_seqnames)
+  chromosome[autosomes] <- "autosomes"
+  X <- grep("X", uniq_seqnames)
+  chromosome[X] <- "chrX"
+  Y <- grep("Y", uniq_seqnames)
+  chromosome[Y] <- "chrY"
+  MT <- grep("M", uniq_seqnames)
+  chromosome[MT] <- "chrMT"
+  names(chromosome) <- uniq_seqnames
+  mh_by_ipd_seqnames[, chromosome := chromosome[seqnames]]
+  mh_by_ipd[, chromosome := "genome"]
+  
+  if (!is.null(seqlevels)) {
+    mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
+  }
+  
+  g <- ggplot(aes(x = IPD, y = log(estimate)), data = mh_by_ipd_seqnames)
+  
+  if (annotate) {
+    g <- g + geom_point(aes(col = chromosome), alpha = 0.5)
+  } else {
+    g <- g + geom_point(alpha = 0.5)
+  }
+  g <- g + facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) + 
+    xlim(c(0, xmax)) +
+    geom_line(aes(x = IPD, y = log(estimate), col = chromosome), 
+              data = mh_by_ipd, 
+              lwd = 1.3) + 
+    thesis_theme +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(hat(theta))) +
+    scale_colour_brewer(palette = "Paired") +
+    guides(colour = guide_legend(title = "Estimate level",
+                                 override.aes = list(alpha = rep(1, 5),
+                                                     shape = c(rep(16, 4), NA),
+                                                     size = rep(3, 5),
+                                                     linetype = c(rep(0, 4), 1)
+                                                     ))) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+plotMHByCGI <- function(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, 
+                        ncol, xmax, pair_type) {
+  x <- rbind(in_cgi_mh_by_ipd[, CGI:= TRUE], out_cgi_mh_by_ipd[, CGI := FALSE])
+  # TODO: Add Dark2 colours so as to be consistent with cor(beta). Add to legend
+  g <- ggplot(aes(x = IPD, y = log(estimate), col = CGI), data = x) + 
+    geom_line(lwd = 1.3) +
+    scale_color_brewer(palette = "Dark2") +
+    thesis_theme +
+    xlim(c(0, xmax)) +
+    facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(hat(theta))) + 
+    guides(colour = guide_legend(title = "CpG island"))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+
+plotMHchr21 <- function(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 
+                        xmax, pair_type, annotate = TRUE, seqlevels = NULL) {
+  
+  # A hack to annotate chromosome as autosome, X, Y or mtDNA
+  uniq_seqnames <- mh_by_ipd_seqnames[, unique(seqnames)]
+  chromosome <- vector("character", length(uniq_seqnames))
+  autosomes <- grep("[0-9]", uniq_seqnames)
+  chromosome[autosomes] <- "autosomes (excl. chr21)"
+  X <- grep("X", uniq_seqnames)
+  chromosome[X] <- "chrX"
+  Y <- grep("Y", uniq_seqnames)
+  chromosome[Y] <- "chrY"
+  MT <- grep("M", uniq_seqnames)
+  chromosome[MT] <- "chrMT"
+  chr21 <- grep("chr21", uniq_seqnames)
+  chromosome[chr21] <- "chr21"
+  names(chromosome) <- uniq_seqnames
+  mh_by_ipd_seqnames[, chromosome := chromosome[seqnames]]
+  mh_by_ipd[, chromosome := "genome"]
+  
+  if (!is.null(seqlevels)) {
+    mh_by_ipd_seqnames <- mh_by_ipd_seqnames[seqnames %in% seqlevels, ]
+  }
+  
+  g <- ggplot(aes(x = IPD, y = log(estimate)), 
+              data = mh_by_ipd_seqnames)
+  
+  if (annotate) {
+    g <- g + geom_point(aes(col = chromosome), alpha = 0.5)
+  } else {
+    g <- g + geom_point(alpha = 0.5)
+  }
+  g <- g + facet_wrap(~ sampleName, nrow = nrow, ncol = ncol) + 
+    xlim(c(0, xmax)) +
+    geom_line(aes(x = IPD, y = log(estimate), col = chromosome), 
+              data = mh_by_ipd, 
+              lwd = 1.3) + 
+    geom_line(aes(x = IPD, y = log(estimate), col = chromosome), 
+              data = mh_by_ipd_seqnames[seqnames == "chr21", ],
+              lwd = 1.3) +
+    thesis_theme +
+    geom_hline(aes(yint = 0), linetype = 2) + 
+    ylab(expression(hat(theta))) +
+    scale_colour_manual(values = c("#A6CEE3", "black", "#1F78B4", "#B2DF8A", 
+                                   "#33A02C", "#FB9A99")) +
+    guides(colour = 
+             guide_legend(title = "Estimate level",
+                          override.aes = list(alpha = rep(1, 6),
+                                              shape = c(16, NA, 16, 16, 16, NA),
+                                                     size = rep(3, 6),
+                                                     linetype = c(0, 1, 0, 0, 
+                                                                  0, 1)
+                                                     ))) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs"))
+  }
+  if (xmax < mh_by_ipd[, max(IPD)]) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+```
+
+#### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+nrow <- 3
+ncol <- 4
+```
+
+```{r EPISCOPE_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r EPISCOPE_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r EPISCOPE_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r EPISCOPE_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+#### Lister
+
+```{r}
+dataset <- "Lister"
+nrow <- 4
+ncol <- 5
+```
+
+```{r Lister_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Lister_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Lister_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Lister_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+#### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+nrow <- 1
+ncol <- 3
+```
+
+```{r Seisenberger_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Seisenberger_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+# Seisenberger is mouse data, hence no chr21
+```
+
+```{r Seisenberger_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 350,
+            "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Seisenberger_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, dataset, nrow, ncol, 500,
+            "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+#### Ziller
+
+```{r}
+dataset <- "Ziller_merged"
+nrow <- 3
+ncol <- 3
+```
+
+```{r Ziller_merged_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, gsub("_merged", "", dataset), nrow, ncol, 
+       350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Ziller_merged_ac_MH_by_seqnames}
+mh_by_ipd_seqnames <- readRDS(paste0(dataset, "_ac_mh_by_ipd_seqnames.rds"))
+mh_by_ipd <- readRDS(paste0(dataset, "_ac_mh_by_ipd.rds"))
+plotMH(mh_by_ipd_seqnames, mh_by_ipd, dataset, nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+plotMHchr21(mh_by_ipd_seqnames, mh_by_ipd, gsub("_merged", "", dataset), nrow, 
+            ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Ziller_merged_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, gsub("_merged", "", dataset), 
+            nrow, ncol, 350, "adjacent") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+```{r Ziller_merged_ac_MH_by_CGI}
+in_cgi_mh_by_ipd <- readRDS(paste0(dataset, 
+                                   "_ac_in_cgi_mh_by_ipd.rds"))
+out_cgi_mh_by_ipd <- readRDS(paste0(dataset, "_ac_out_cgi_mh_by_ipd.rds"))
+plotMHByCGI(in_cgi_mh_by_ipd, out_cgi_mh_by_ipd, gsub("_merged", "", dataset), 
+            nrow, ncol, 500, "all") +
+  ylim(-2.5, 7.5) + 
+  ylab(bquote(atop(hat(theta)[MH], "Truncated [-2.5, 7.5]")))
+```
+
+# Scatterplots of pairs of $\beta$-values
+
+```{r}
+methpat <- readRDS("../processed_data/Lister/Lister_1_tuples_strand_collapsed.rds")
+methpat <- methpat[, "ADS"]
+ipd <- c(2, 20, 200, 2000)
+id_dt <- setDT(expand.grid(IPD = ipd, 
+                           strand = levels(droplevels(strand(methpat))),
+                           pair_feature_status = NA))
+id_dt[, c("KEY", "ID") := list(paste(IPD, strand, NA, 
+                                     sep = ''),
+                               seq_len(nrow(id_dt)))]
+setkey(id_dt, ID)
+methpat_order <- order(methpat)
+methpat_rd_sorted <- rowData(methpat)[methpat_order]
+meth_level <- methLevel(methpat, min_cov = 10L)
+in_feature <- rep(NA, nrow(methpat))
+adjacent_pairs_idx <- .Call("Cpp_MethylationTuples_makeAdjacentPairs", 
+                            PACKAGE = "MethylationTuples", 
+                            methpat_order, 
+                            as.character(seqnames(methpat_rd_sorted)), 
+                            as.character(strand(methpat_rd_sorted)), 
+                            start(methpat_rd_sorted), 
+                            in_feature, 
+                            id_dt)
+adjacent_pairs_idx <- lapply(adjacent_pairs_idx, function(x, i) {
+  x[i]
+}, i = which(adjacent_pairs_idx$ID != 0))
+all_pairs_idx <- .Call("Cpp_MethylationTuples_makeAllPairs", 
+                       PACKAGE = "MethylationTuples", 
+                       methpat_order, 
+                       as.character(seqnames(methpat_rd_sorted)), 
+                       as.character(strand(methpat_rd_sorted)), 
+                       start(methpat_rd_sorted), 
+                       in_feature, 
+                       ipd, 
+                       id_dt)
+beta_vals <- data.table(IPD = c(start(methpat_rd_sorted)[adjacent_pairs_idx$j] - 
+                         start(methpat_rd_sorted)[adjacent_pairs_idx$i], 
+                         start(methpat_rd_sorted)[all_pairs_idx$j] - 
+                           start(methpat_rd_sorted)[all_pairs_idx$i]),
+                       beta1 = c(meth_level[methpat_order[adjacent_pairs_idx$i]], 
+                                 meth_level[methpat_order[all_pairs_idx$i]]),
+                       beta2 = c(meth_level[methpat_order[adjacent_pairs_idx$j]], 
+                                 meth_level[methpat_order[all_pairs_idx$j]]),
+                       pair_type = c(rep("adjacent", 
+                                         length(adjacent_pairs_idx$i)),
+                                     rep("all", length(all_pairs_idx$i)))
+                       )
+
+pdf(file = "ADS_beta_scatterplots.pdf", height = 9, width = 16)
+par(mfrow = c(2, 4), mar = c(2.5, 2.5, 1.6, 1.1), mgp = c(1.5, 0.5, 0), 
+    cex = 1.2)
+for (i in c("adjacent", "all")) {
+  for(j in ipd) {
+    x <- beta_vals[pair_type == i & IPD == j, ]
+    n <- nrow(x)
+    cor <- cor(x$beta1, x$beta2, use = "complete.obs", method = "pearson")
+    if (i == "adjacent") {
+      smoothScatter(x = x$beta1, y = x$beta2, sub = paste0("n = ", n),
+                    main = bquote("IPD = " * .(j) * ", " * NIL * 
+                                    "= 0, n = " * .(n)), 
+                    xlab = expression(beta[1]), ylab = expression(beta[2]))
+    } else {
+      smoothScatter(x = x$beta1, y = x$beta2, sub = paste0("n = ", n),
+                    main = bquote("IPD = " * .(j) * ", " * NIL >= 0 * 
+                                    ", n = " * .(n)), 
+                    xlab = expression(beta[1]), ylab = expression(beta[2]))
+    }
+    text(x = 0.5, y = 0.5, labels = paste0("cor = ", round(cor, 2)))
+  }
+  # A clunky hank to get an outer title
+  title("\nADS", outer = TRUE)
+}
+dev.off()
+```
+
+# Correlation of aggregate co-methylation
+
+## Computations
+
+```{r}
+ipd <- 2:2000
+```
+
+### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+cpgs <- readRDS("cpgs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+### Lister
+
+```{r}
+dataset <- "Lister"
+cpgs <- readRDS("cpgs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples.rds"))
+# Drop chrL since this isn't a human chromosome
+methpat <- dropSeqlevels(methpat, "chrL")
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+# Drop chrL since this isn't a human chromosome
+methpat <- dropSeqlevels(methpat, "chrL")
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+cpgs <- readRDS("cpgs_mm10.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_spearman_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_1_tuples_strand_collapsed.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, "_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, paste0(dataset, 
+                     "_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+### Ziller
+
+```{r}
+dataset <- "Ziller"
+cpgs <- readRDS("cpgs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_1_tuples.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_min_cov_5_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-separate
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_pearson_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 5L)
+saveRDS(cors, paste0(dataset, "_merged_spearman_beta_cors_all_min_cov_5.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, paste0(dataset, 
+                     "_merged_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 5L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_spearman_pearson_beta_cors_all_min_cov_5_CGI.rds"))
+rm(cors)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_1_tuples_strand_collapsed.rds"))
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_pearson_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_spearman_beta_cors_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+## CGI-stratified
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_pearson_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "strict_adjacent", 
+                     ref_loci = unstrand(cpgs[strand(cpgs) == "+"]), 
+                     method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, 
+        paste0(
+          dataset, 
+          "_merged_spearman_beta_cors_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+# NIL >= 0, strand-collapsed
+## Genome-wide
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", min_cov = 10L)
+saveRDS(cors, 
+        paste0(dataset, 
+               "_merged_pearson_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", min_cov = 10L)
+saveRDS(cors, 
+        paste0(
+          dataset, 
+          "_merged_spearman_beta_cors_all_min_cov_10_strand_collapsed.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "pearson", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, paste0(
+  dataset, "_merged_pearson_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+cors <- methLevelCor(methpat, pair_type = "all", ipd = ipd,
+                     ref_loci = cpgs, method = "spearman", feature = cgi, 
+                     min_cov = 10L)
+saveRDS(cors, 
+        paste0(
+          dataset, 
+          "_merged_spearman_beta_cors_all_min_cov_10_strand_collapsed_CGI.rds"))
+rm(cors)
+rm(methpat)
+```
+
+## Plots
+
+### Functions
+
+```{r}
+# TODO: Figure out quote-eval the stratifying variable (i.e., strand, 
+# pair_feature_status, method)
+betaCorPlot <- function(cors, dataset, min_cov, coef, xmax, pair_type, ncol, 
+                        nrow, strand = FALSE, CGI = FALSE, method = FALSE) {
+  if (strand) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = strand, fill = strand), 
+                data = cors) +
+      ylab(paste0(coef, " correlation")) +
+      scale_colour_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+  } else if (CGI) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = CGI, fill = CGI), data = cors) +
+      ylab(paste0(coef, " correlation")) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2")
+  } else if (method) {
+    g <- ggplot(aes(x = IPD, y = cor, colour = method, fill = method), 
+                data = cors) +
+      ylab("Correlation") +
+      scale_colour_brewer(palette = "Accent") + 
+      scale_fill_brewer(palette = "Accent")
+  } else {
+    g <- ggplot(aes(x = IPD, y = cor), data = cors) +
+      ylab(paste0(coef, " correlation"))
+    } 
+  g <- g + 
+    geom_point(alpha = 0.3) + 
+    geom_line(method = 'loess', span = 0.1, lwd = 2, stat = 'smooth') +
+    facet_wrap(~ sample, nrow = nrow, ncol = ncol) + 
+    thesis_theme + 
+    xlim(c(0, xmax)) +
+    coord_cartesian(ylim = c(-1, 1))
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  }
+  if (xmax < max(cors[, IPD])) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+      g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+}
+```
+
+### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 4, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 4, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+### Lister
+
+```{r}
+dataset <- "Lister"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 500, 
+                 ncol = 5, nrow = 4, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 5, nrow = 4, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+min_cov <- 10
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 1, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_pearson_vs_spearman_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+                       min_cov, "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 1, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+### Ziller
+
+```{r}
+dataset <- "Ziller"
+# NIL = 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                               "_beta_cors_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                                "_beta_cors_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", method = TRUE)
+ggsave(paste0(dataset, "_merged_pearson_vs_spearman_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 1500, 
+                 ncol = 3, nrow = 3, pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+
+# NIL >= 0
+## Demonstrate that strand-specific correlations are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate that Pearson and Spearman give qualitatively similar results
+min_cov <- 10
+coef <- "Pearson"
+pearson_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                               "_beta_cors_all_min_cov_", min_cov, 
+                               "_strand_collapsed.rds"))
+pearson_cors[, method := "Pearson"]
+coef <- "Spearman"
+spearman_cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                                "_beta_cors_all_min_cov_", min_cov, 
+                                "_strand_collapsed.rds"))
+spearman_cors[, method := "Spearman"]
+cors <- rbind(pearson_cors, spearman_cors)
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", method = TRUE)
+ggsave(paste0(dataset, "_merged_pearson_vs_spearman_beta_cors_all_min_cov_",
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, pearson_cors, spearman_cors, g)
+## Demonstrate the genome-level correlations
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_",
+              min_cov, "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+## Demonstrate the difference between CpG islands and non islands
+min_cov <- 10
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+coef <- "Spearman"
+cors <- readRDS(paste0(dataset, "_merged_", tolower(coef), 
+                       "_beta_cors_all_min_cov_", min_cov, 
+                       "_strand_collapsed_CGI.rds"))
+cors <- cors[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cors <- cors[IPD != 1, ]
+g <- betaCorPlot(cors, dataset, min_cov = min_cov, coef = coef, xmax = 2000, 
+                 ncol = 3, nrow = 3, pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_beta_cors_all_min_cov_", 
+              min_cov, "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cors, g)
+```
+
+## Spectrum
+
+### Functions
+
+```{r}
+findFreq <- function(x, n = 1000, f = 0.1) {
+  n <- min(min(which(is.na(x))) - 1, n)
+  l <- lowess(x[seq_len(n)], f = f)
+  s <- spectrum(ts(l$y), plot = FALSE, na.action = na.omit)
+  # Take the second value because the first value is the fundamental
+  (1 / s$freq[order(s$spec, decreasing = TRUE)])[1:2]
+}
+```
+
+# Old code: estimating within-fragment co-methylation at individual 2-tuples
+
+__WARNING: This is old code__. 
+
+The code in this section was used when exploring whether it was feasible to estimate within-fragment co-methylation for individual 2-tuples ($2 \times 2$ tables) from whole-genome bisulfite-sequencing experiments. The simulation study above shows that 'best' estimator, the 0.5-adjusted unconditional maximum likelihood estimator, is severely biased for the sort of $2 \times 2$ tables we get from whole-genome bisulfite-sequencing experiments.
+
+## Within-fragment co-methylation
+
+For the $NIL = 0$, I remove all pairs where $NIL > 0$ __according to CpGs in the reference genome__. Technically, this should be done based on sample-specific CpGs, but this is quite a bit more difficult. Moreover, it won't have a huge effect on genome-wide analyses.
+
+### Computations
+
+#### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+cpg_pairs <- readRDS("cpg_pairs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2_tuples.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_5.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_5.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, 
+                            unstrand(cpg_pairs[strand(cpg_pairs) == "+"]), 
+                            type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_10_strand_collapsed.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_10_strand_collapsed.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2ac_tuples.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_5_ac.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_5_ac.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_10_strand_collapsed_ac.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_10_strand_collapsed_ac.rds"))
+rm(pearson)
+rm(methpat)
+```
+
+#### Lister
+
+```{r}
+dataset <- "Lister"
+cpg_pairs <- readRDS("cpg_pairs_hg18.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2_tuples.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_5.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_5.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, 
+                            unstrand(cpg_pairs[strand(cpg_pairs) == "+"]), 
+                            type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_10_strand_collapsed.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_10_strand_collapsed.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2ac_tuples.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_5_ac.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_5_ac.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_10_strand_collapsed_ac.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_10_strand_collapsed_ac.rds"))
+rm(pearson)
+rm(methpat)
+```
+
+#### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+cpg_pairs <- readRDS("cpg_pairs_mm10.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2_tuples.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_5.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_5.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, 
+                            unstrand(cpg_pairs[strand(cpg_pairs) == "+"]), 
+                            type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_10_strand_collapsed.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_10_strand_collapsed.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2ac_tuples.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_5_ac.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_5_ac.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_2ac_tuples_strand_collapsed.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_lor_min_cov_10_strand_collapsed_ac.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_pearson_min_cov_10_strand_collapsed_ac.rds"))
+rm(pearson)
+rm(methpat)
+```
+
+#### Ziller
+
+```{r}
+dataset <- "Ziller"
+cpg_pairs <- readRDS("cpg_pairs_hg19.rds")
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+
+# NIL = 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_2_tuples.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, cpg_pairs, type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_merged_lor_min_cov_5.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_merged_pearson_min_cov_5.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL = 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_2_tuples_strand_collapsed.rds"))
+## Remove pairs with NIL > 0
+methpat <- subsetByOverlaps(methpat, 
+                            unstrand(cpg_pairs[strand(cpg_pairs) == "+"]), 
+                            type = "equal")
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_merged_lor_min_cov_10_strand_collapsed.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, 
+                        "_merged_pearson_min_cov_10_strand_collapsed.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-separate
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_2ac_tuples.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_merged_lor_min_cov_5_ac.rds"))
+rm(lor)
+## Computer Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 5L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, "_merged_pearson_min_cov_5_ac.rds"))
+rm(pearson)
+rm(methpat)
+
+# NIL >= 0, strand-collapsed
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset,
+                          "_merged_2ac_tuples_strand_collapsed.rds"))
+## Compute LORs
+lor <- cometh(methpat, method = "lor", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(lor, paste0(dataset, "_merged_lor_min_cov_10_strand_collapsed_ac.rds"))
+rm(lor)
+## Compute Pearson correlations
+pearson <- cometh(methpat, method = "pearson", min_cov = 10L, feature = cgi, offset = 0.5)
+saveRDS(pearson, paste0(dataset, 
+                        "_merged_pearson_min_cov_10_strand_collapsed_ac.rds"))
+rm(pearson)
+rm(methpat)
+```
+
+### Plots
+
+#### Functions
+
+```{r}
+quantileComethPlot <- function(cometh, probs, dataset, min_cov, coef, xmax,
+                               ymin, ymax, pair_type, ncol, nrow, 
+                               strand = FALSE, CGI = FALSE) {
+  if (strand) {
+    q <- cometh[, IPD := pos2 - pos1][, as.list(quantile(statistic, probs, 
+                                                      na.rm = TRUE)), 
+                                   by = list(sample, IPD, strand)]
+    g <- ggplot(aes(x = IPD, y = `50%`, colour = strand, fill = strand), 
+                data = q) +
+      scale_colour_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+  } else if (CGI) {
+    q <- cometh[, IPD := pos2 - pos1][, as.list(quantile(statistic, probs, 
+                                                         na.rm = TRUE)), 
+                                   by = list(sample, IPD, CGI)]
+    g <- ggplot(aes(x = IPD, y = `50%`, colour = CGI, fill = CGI), data = q) +
+      scale_colour_brewer(palette = "Dark2") + 
+      scale_fill_brewer(palette = "Dark2")
+  } else {
+    q <- cometh[, IPD := pos2 - pos1][, as.list(quantile(statistic, probs, 
+                                                         na.rm = TRUE)), 
+                                   by = list(sample, IPD)]
+    g <- ggplot(aes(x = IPD, y = `50%`), data = q) +
+      scale_colour_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+  }
+  if (coef == "Pearson") {
+    g <- g + ylab("Pearson correlation")    
+  } else {
+    g <- g + ylab(bquote(atop(log[2]("odds ratio"),
+                              "Restricted to [" * .(ymin) * ", " * .(ymax) * 
+                                "]")))
+  }
+  g <- g + geom_line(size = 1.5) + 
+    geom_ribbon(aes(ymin = `25%`, ymax = `75%`), alpha = 0.5, linetype = 0) + 
+    geom_ribbon(aes(ymin = `10%`, ymax = `90%`), alpha = 0.25, linetype = 0) +
+    geom_hline(aes(yint = 0), linetype = 2) +
+    xlim(c(0, xmax)) +
+    coord_cartesian(ylim = 1.1 * c(ymin, ymax)) + 
+    facet_wrap(~ sample, ncol = ncol, nrow = nrow) + 
+    thesis_theme 
+  if (pair_type == "all") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL >= 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  } else if (pair_type == "adjacent") {
+    g <- g +
+      ggtitle(bquote(.(dataset) * ": " * NIL == 0 * " pairs (min. coverage = " * 
+                       .(min_cov) * " )"))
+  }
+  if (xmax < max(cometh[, IPD])) {
+    g <- g + xlab(label = paste0("IPD (bp)\nTruncated at ", xmax, " bp"))
+  } else {
+    g <- g + xlab(label = "IPD (bp)")
+  }
+  g
+  }
+```
+
+#### EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+# NIL = 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 4, nrow = 3, 
+                     pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 4, nrow = 3, 
+                     pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 4, nrow = 3, 
+                     pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cometh, g)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                         "_strand_collapsed.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 250, ymin = -1, ymax = 1, ncol = 4, nrow = 3, 
+                        pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+
+# NIL >= 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 4, nrow = 3, 
+                     pair_type = "all",
+                     strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 4, nrow = 3, 
+                     pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 4, nrow = 3, 
+                     pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                         "_strand_collapsed_ac.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 400, ymin = -1, ymax = 1, ncol = 4, nrow = 3, 
+                        pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+```
+
+#### Lister
+
+```{r}
+dataset <- "Lister"
+# NIL = 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 5, nrow = 4, 
+                     pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 5, nrow = 4, 
+                     pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 5, nrow = 4, 
+                     pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cometh, g)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                         "_strand_collapsed.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 250, ymin = -1, ymax = 1, ncol = 5, nrow = 4, 
+                        pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+
+# NIL >= 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 5, nrow = 4, 
+                     pair_type = "all",
+                     strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 5, nrow = 4, 
+                     pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 5, nrow = 4, 
+                     pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                         "_strand_collapsed_ac.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 400, ymin = -1, ymax = 1, ncol = 5, nrow = 4, 
+                        pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+```
+
+#### Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+# NIL = 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 3, nrow = 1, 
+                     pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 3, nrow = 1, 
+                     pair_type = "adjacent")
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 3, nrow = 1, 
+                     pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cometh, g)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                         "_strand_collapsed.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 250, ymin = -1, ymax = 1, ncol = 3, nrow = 1, 
+                        pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+
+# NIL >= 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 3, nrow = 1, 
+                     pair_type = "all",
+                     strand = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.pdf"), g, height = 9, width = 16)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 3, nrow = 1, 
+                     pair_type = "all")
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 3, nrow = 1, 
+                     pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                         "_strand_collapsed_ac.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 400, ymin = -1, ymax = 1, ncol = 3, nrow = 1, 
+                        pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+```
+
+#### Ziller
+
+```{r}
+dataset <- "Ziller"
+# NIL = 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+                         min_cov, ".rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 3, nrow = 3, 
+                     pair_type = "adjacent", strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+              min_cov, ".pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+                         min_cov, "_strand_collapsed.rds"))
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 3, nrow = 3, 
+                     pair_type = "adjacent")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 250, ymin = -1.5, ymax = 5, ncol = 3, nrow = 3, 
+                     pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_CGI.pdf"), g, height = 9, width = 16)
+rm(cometh, g)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+                         min_cov, "_strand_collapsed.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 250, ymin = -1, ymax = 1, ncol = 3, nrow = 3, 
+                        pair_type = "adjacent", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+
+# NIL >= 0
+## Demonstrate that strand-specific LORs are very similar, therefore 
+## safe to strand-collapse.
+min_cov <- 5
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+                         min_cov, "_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 3, nrow = 3, 
+                     pair_type = "all",
+                     strand = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+                       "_ac.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Genome-wide LORs
+min_cov <- 10
+coef <- "LOR"
+cometh <- readRDS(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+                         min_cov, "_strand_collapsed_ac.rds"))
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 3, nrow = 3, 
+                     pair_type = "all")
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac.pdf"), g, height = 9, width = 16)
+rm(g)
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                     dataset = dataset, min_cov = min_cov, coef = coef, 
+                     xmax = 400, ymin = -1.5, ymax = 5, ncol = 3, nrow = 3, 
+                     pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+## Demonstrate that Pearson's correlation gives qualitatively similar, but less 
+## interpretable results, to LOR.
+coef <- "Pearson"
+cometh <- readRDS(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", 
+                         min_cov, "_strand_collapsed_ac.rds"))
+## Demonstrate the difference between CpG islands and non islands
+cometh <- cometh[pair_feature_status != 1, ][, CGI := pair_feature_status == 2]
+### Drop IPD = 1, which shouldn't occur for CpGs. 
+cometh <- cometh[(pos2 - pos1) != 1, ]
+g <- quantileComethPlot(cometh, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), 
+                        dataset = dataset, min_cov = min_cov, coef = coef, 
+                        xmax = 400, ymin = -1, ymax = 1, ncol = 3, nrow = 3, 
+                        pair_type = "all", CGI = TRUE)
+ggsave(paste0(dataset, "_merged_", tolower(coef), "_min_cov_", min_cov, 
+              "_strand_collapsed_ac_CGI.pdf"), g, height = 9, width = 16)
+rm(g, cometh)
+```
+
+### LOR vs Pearson frequency polygons
+
+```{r}
+set.seed(666)
+n <- 1000000
+dataset <- "EPISCOPE"
+min_cov <- 10
+coef <- "LOR"
+lors <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+g <- ggplot(aes(x = statistic), data = lors) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.5) +
+  facet_wrap(~ sample, ncol = 4, nrow = 3) + 
+  ggtitle(paste0(dataset, ": ", coef)) +
+  thesis_theme
+ggsave(paste0(dataset, "_", tolower(coef), "_histogram.pdf"), g, height = 9, 
+       width = 16)
+rm(g)
+
+coef <- "Pearson"
+cors <- readRDS(paste0(dataset, "_", tolower(coef), "_min_cov_", min_cov, 
+                       "_strand_collapsed.rds"))
+g <- ggplot(aes(x = statistic), data = cors) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.05) +
+  facet_wrap(~ sample, ncol = 4, nrow = 3) + 
+  ggtitle(paste0(dataset, ": ", coef)) +
+  thesis_theme
+ggsave(paste0(dataset, "_", tolower(coef), "_histogram.pdf"), g, height = 9, 
+       width = 16)
+rm(g)
+```
