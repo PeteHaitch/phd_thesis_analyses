@@ -1,0 +1,279 @@
+---
+title: "Supplementary material for WGBS Bioinformatics Analysis"
+author: "Peter Hickey"
+date: "Modified: 22 April 2015. Compiled: `r format(Sys.Date(), '%d %b %Y')`"
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 16, fig.height = 9)
+```
+
+# Number of CpGs per read
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+thesis_theme <- theme_classic(base_size = 20)
+thesis_theme <- theme_bw(base_size = 20)
+```
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+hist <- lapply(paste0(dataset, "/",
+                      list.files(dataset, "\\.CG\\_per\\_read\\.hist")), 
+               read.table, header = TRUE)
+sn <- gsub("\\.CG\\_per\\_read\\.hist", "", 
+           list.files(dataset, "\\.CG\\_per\\_read\\.hist"))
+hist_df <- bind_rows(hist) %>% 
+  mutate(Sample = rep(sn, sapply(hist, nrow))) %>%
+  group_by(Sample) %>%
+  mutate(Proportion = count / sum(as.numeric(count)))
+g <- hist_df %>%
+  ggplot(aes(x = n, y = Proportion * 100)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~ Sample, ncol = 4, nrow = 3) +
+  coord_cartesian(xlim = c(-1, 8.5)) + 
+  scale_y_continuous(label = comma) + 
+  xlab("Number of CpGs per read\n(Axis truncated at 8)") + 
+  ylab("Percentage of total reads") + 
+  ggtitle(paste0(dataset, ": Number of CpGs per read")) +
+  thesis_theme
+ggsave(paste0(dataset, "_CpGs_per_read.pdf"), g, width = 16, height = 9)
+```
+
+## Lister
+
+```{r}
+dataset <- "Lister"
+hist <- lapply(paste0(dataset, "/",
+                      list.files(dataset, "\\.CG\\_per\\_read\\.hist")), 
+               read.table, header = TRUE)
+sn <- gsub("\\.CG\\_per\\_read\\.hist", "", 
+           list.files(dataset, "\\.CG\\_per\\_read\\.hist"))
+sn <- gsub("DM\\_", "", sn)
+hist_df <- bind_rows(hist) %>% 
+  mutate(Sample = rep(sn, sapply(hist, nrow))) %>%
+  group_by(Sample) %>%
+  mutate(Proportion = count / sum(as.numeric(count)))
+g <- hist_df %>%
+  ggplot(aes(x = n, y = Proportion * 100)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~ Sample, ncol = 5, nrow = 4) +
+  coord_cartesian(xlim = c(-1, 8.5)) + 
+  scale_y_continuous(label = comma) + 
+  xlab("Number of CpGs per read\n(Axis truncated at 8)") + 
+  ylab("Percentage of total reads") + 
+  ggtitle(paste0(dataset, ": Number of CpGs per read")) +
+  thesis_theme
+ggsave(paste0(dataset, "_CpGs_per_read.pdf"), g, width = 16, height = 9)
+```
+
+## Seisenberger
+
+```{r}
+dataset <- "Seisenberger"
+hist <- lapply(paste0(dataset, "/",
+                      list.files(dataset, "\\.CG\\_per\\_read\\.hist")), 
+               read.table, header = TRUE)
+sn <- gsub("\\.CG\\_per\\_read\\.hist", "", 
+           list.files(dataset, "\\.CG\\_per\\_read\\.hist"))
+sn <- gsub("DM\\_", "", sn)
+hist_df <- bind_rows(hist) %>% 
+  mutate(Sample = rep(sn, sapply(hist, nrow))) %>%
+  group_by(Sample) %>%
+  mutate(Proportion = count / sum(as.numeric(count)))
+g <- hist_df %>%
+  ggplot(aes(x = n, y = Proportion * 100)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~ Sample, ncol = 3, nrow = 1) +
+  coord_cartesian(xlim = c(-1, 8.5)) + 
+  scale_y_continuous(label = comma) + 
+  xlab("Number of CpGs per read\n(Axis truncated at 8)") + 
+  ylab("Percentage of total reads") + 
+  ggtitle(paste0(dataset, ": Number of CpGs per read")) +
+  thesis_theme
+ggsave(paste0(dataset, "_CpGs_per_read.pdf"), g, width = 16, height = 9)
+```
+
+## Ziller
+
+```{r}
+dataset <- "Ziller"
+hist <- lapply(paste0(dataset, "/",
+                      list.files(dataset, "\\.CG\\_per\\_read\\.hist")), 
+               read.table, header = TRUE)
+sn <- gsub("\\.CG\\_per\\_read\\.hist", "", 
+           list.files(dataset, "\\.CG\\_per\\_read\\.hist"))
+sn <- gsub("\\.rmdup", "", sn)
+hist_df <- bind_rows(hist) %>% 
+  mutate(Sample = rep(sn, sapply(hist, nrow))) %>%
+  group_by(Sample) %>%
+  mutate(Proportion = count / sum(as.numeric(count)))
+g <- hist_df %>%
+  ggplot(aes(x = n, y = Proportion * 100)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~ Sample, ncol = 5, nrow = 4) +
+  coord_cartesian(xlim = c(-1, 8.5)) + 
+  scale_y_continuous(label = comma) + 
+  xlab("Number of CpGs per read\n(Axis truncated at 8)") + 
+  ylab("Percentage of total reads") + 
+  ggtitle(paste0(dataset, ": Number of CpGs per read")) +
+  thesis_theme
+ggsave(paste0(dataset, "_CpGs_per_read.pdf"), g, width = 16, height = 9)
+```
+
+## Ziller merged
+
+```{r}
+dataset <- "Ziller"
+hist <- lapply(paste0(dataset, "/",
+                      list.files(dataset, "\\.CG\\_per\\_read\\.hist")), 
+               read.table, header = TRUE)
+sn <- gsub("\\.CG\\_per\\_read\\.hist", "", 
+           list.files(dataset, "\\.CG\\_per\\_read\\.hist"))
+sn <- gsub("\\.rmdup", "", sn)
+names(hist) <- sn
+sm <- list("Frontal_cortex_normal_1" = c("SRR949193", "SRR949194", "SRR949195"), 
+           "Frontal_cortex_normal_2" = c("SRR949196", "SRR949197", "SRR949198"), 
+           "Frontal_cortex_AD_1"  = c("SRR949199", "SRR949201"), 
+           "Frontal_cortex_AD_2" = c("SRR949202", "SRR949203"), 
+           "HepG2_cell_line" = c("SRR949206", "SRR949207"), 
+           "IMR90_cell_line" = c("SRR949208", "SRR949209"), 
+           "Colon_Tumor_Primary" = c("SRR949210", "SRR949211", "SRR949212", 
+                                     "SRR949213"),
+           "Colon_Primary_Normal" = c("SRR949215"))
+hist <- lapply(names(sm), function(bsn, sm, hist) {
+  bind_rows(lapply(hist[sm[[bsn]]], tbl_df)) %>% 
+    group_by(n) %>%
+    summarise(count = sum(count))
+  }, sm = sm, hist)
+hist_df <- bind_rows(hist) %>% 
+  mutate(Sample = rep(names(sm), sapply(hist, nrow))) %>%
+  group_by(Sample) %>%
+  mutate(Proportion = count / sum(as.numeric(count)))
+g <- hist_df %>%
+  ggplot(aes(x = n, y = Proportion * 100)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~ Sample, ncol = 3, nrow = 3) +
+  coord_cartesian(xlim = c(-1, 8.5)) + 
+  scale_y_continuous(label = comma) + 
+  xlab("Number of CpGs per read\n(Axis truncated at 8)") + 
+  ylab("Percentage of total reads") + 
+  ggtitle(paste0(dataset, " merged: Number of CpGs per read")) +
+  thesis_theme
+ggsave(paste0(dataset, "_merged_CpGs_per_read.pdf"), g, width = 16, height = 9)
+```
+
+# Examples of M-bias
+
+```{r}
+library(MethylationTuples)
+thesis_theme <- theme_bw(base_size = 20)
+
+# ADS
+mbias <- readMBias("M-bias/data/Lister/ADS.M-bias.txt")
+g <- plot(mbias) + thesis_theme
+ggsave("ADS_M-bias.pdf", g, height = 9, width = 16)
+
+# E18VA
+mbias <- readMBias("M-bias/data/EPISCOPE/E18VA.M-bias.txt")
+g <- plot(mbias) + thesis_theme
+ggsave("E18VA_M-bias.pdf", g, height = 9, width = 16)
+```
+
+# `methtuple` performance
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(gridExtra)
+
+# facet_wrap_labeller() from http://stackoverflow.com/a/19298442
+facet_wrap_labeller <- function(gg.plot, labels = NULL) {
+  #works with R 3.0.1 and ggplot2 0.9.3.1
+
+  g <- ggplotGrob(gg.plot)
+  gg <- g$grobs
+  strips <- grep("strip_t", names(gg))
+
+  for(ii in seq_along(labels))  {
+    modgrob <- getGrob(gg[[strips[ii]]], "strip.text",
+                       grep=TRUE, global=TRUE)
+    gg[[strips[ii]]]$children[[modgrob$name]] <- editGrob(modgrob,
+                                                          label = labels[ii])
+    }
+
+  g$grobs <- gg
+  class(g) = c("arrange", "ggplot",class(g))
+  g
+  }
+thesis_theme <- theme_bw(base_size = 20)
+# Time
+time <- lapply(paste0("methtuple_performance/time/",
+                      list.files("methtuple_performance/time/")),
+               read.table)
+names(time) <- gsub(".time", "",
+                    list.files("methtuple_performance/time/"))
+n <- str_split(names(time), "\\.")
+time <- data_frame("Chromosome" = factor(rep(sapply(n, "[", 1),
+                                             times = sapply(time, nrow)),
+                                         levels =
+                                           paste0("chr",
+                                                  c(1:22, "X", "Y", "M", "L"))),
+                   "Tuple" = rep(sapply(n, "[", 2),
+                                 times = sapply(time, nrow)),
+                   "Time" = unlist(time))
+
+gg_time <- time %>%
+  ggplot(aes(x = Chromosome, y = Time / 60)) + geom_boxplot() +
+  facet_wrap( ~ Tuple, ncol = 3) + thesis_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12)) + 
+  ylab("Running time (minutes)") +
+  ggtitle("Running time of methtuple across 49 samples")
+gg_time <- facet_wrap_labeller(gg_time, paste0("Tuple size: ", 
+                                               unique(time$Tuple)))
+ggsave("methtuple_runtime.pdf", gg_time, width = 16, height = 13)
+```
+
+```{r}
+# Memory
+memory <- lapply(paste0("methtuple_performance/memory/",
+                        list.files("methtuple_performance/memory/")),
+                 read.table)
+names(memory) <- gsub(".memory", "",
+                      list.files("methtuple_performance/memory/"))
+n <- str_split(names(memory), "\\.")
+# NB: Need to divide reported memory usage by 4 due to bug in 'time'
+# (https://bugzilla.redhat.com/show_bug.cgi?id=703865)
+memory <- data_frame("Chromosome" = factor(rep(sapply(n, "[", 1),
+                                               times = sapply(memory, nrow)),
+                                           levels =
+                                             paste0("chr",
+                                                    c(1:22, "X", "Y", "M", "L"))),
+                     "Tuple" = rep(sapply(n, "[", 2),
+                                   times = sapply(memory, nrow)),
+                     "Memory" = unlist(memory) / 4)
+gg_memory <- memory %>%
+  ggplot(aes(x = Chromosome, y = Memory / 10^6)) + geom_boxplot() +
+  facet_wrap( ~ Tuple, ncol = 3) + thesis_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10)) + 
+  ylab("Maximum memory usage (GB)") +
+  ggtitle("Maximum memory usage of methtuple across 49 samples")
+gg_memory <- facet_wrap_labeller(gg_memory, paste0("Tuple size: ", 
+                                                   unique(memory$Tuple)))
+ggsave("methtuple_memory.pdf", gg_memory, width = 16, height = 13)
+```
+
+# Session info
+
+```{r}
+library(devtools)
+session_info()
+```
