@@ -1,0 +1,330 @@
+---
+title: "Sequencing coverage"
+author: "Peter Hickey"
+date: "Modified: 22 April 2015. Compiled: `r format(Sys.Date(), '%d %b %Y')`"
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+thesis_theme <- theme_classic(base_size = 20)
+thesis_theme <- theme_bw(base_size = 20)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 16, fig.height = 9)
+```
+
+# Sequencing coverage of datasets
+
+## EPISCOPE
+
+```{r}
+dataset <- "EPISCOPE"
+sn <- gsub(pattern = "\\.bam\\.repeats\\.hist\\.all\\.txt", replacement = "", 
+           x = list.files(path = dataset, pattern = "*\\.repeats.hist.all.txt"))
+# Repeats
+repeats <- lapply(paste0(dataset, "/", 
+                         list.files(path = dataset, 
+                                    pattern = "*\\.repeats.hist.all.txt")), 
+                  read.table, stringsAsFactors = FALSE, sep = "\t")
+repeats_df <- bind_rows(repeats)
+colnames(repeats_df) <- c("Source", "Coverage", "Count", "Total", "Proportion")
+repeats_df <- mutate(repeats_df, Sample = rep(sn, sapply(repeats, nrow)), 
+                     Region = "Repeat")
+# Non-repeats
+non_repeats <- lapply(paste0(dataset, "/", 
+                             list.files(path = dataset, 
+                                        pattern = "*\\.nonrepeats.hist.all.txt")), 
+                      read.table, stringsAsFactors = FALSE, sep = "\t")
+non_repeats_df <- bind_rows(non_repeats)
+colnames(non_repeats_df) <- c("Source", "Coverage", "Count", "Total", 
+                              "Proportion")
+non_repeats_df <- mutate(non_repeats_df, 
+                         Sample = rep(sn, sapply(non_repeats, nrow)), 
+                         Region = "Non-repeat")
+cov <- rbind(repeats_df, non_repeats_df)
+
+genome_size <- as.numeric(unique(repeats_df$Total)) + 
+  as.numeric(unique(non_repeats_df$Total))
+
+g <- cov %>% 
+  group_by(Sample, Coverage) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  mutate(Total = genome_size) %>%
+  arrange(Coverage) %>%
+  group_by(Sample) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line() + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 4, nrow = 3) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme
+g
+ggsave(paste0(dataset, "_coverage.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Coverage of RepeatMasker elements is on average higher than non-masked regions!
+# Probably due to promiscuous mapping to repetitive elements.
+# Should really stratify by the repeat class, e.g., SINE, LINE, ALU, etc.
+g <- cov %>% 
+  group_by(Sample, Region, Coverage, Total) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  arrange(Coverage) %>%
+  group_by(Sample, Region) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line(aes(colour = Region)) + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 4, nrow = 3) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme + 
+  scale_colour_brewer(palette = "Dark2")
+g
+ggsave(paste0(dataset, "_coverage_repeat_stratified.pdf"), g, width = 16, 
+       height = 9)
+rm(g)
+```
+
+## Lister
+```{r}
+dataset <- "Lister"
+sn <- gsub(pattern = "\\.bam\\.repeats\\.hist\\.all\\.txt", replacement = "", 
+           x = list.files(path = dataset, pattern = "*\\.repeats.hist.all.txt"))
+sn <- gsub("DM\\_", "", sn)
+# Repeats
+repeats <- lapply(paste0(dataset, "/", 
+                         list.files(path = dataset, 
+                                    pattern = "*\\.repeats.hist.all.txt")), 
+                  read.table, stringsAsFactors = FALSE, sep = "\t")
+repeats_df <- bind_rows(repeats)
+colnames(repeats_df) <- c("Source", "Coverage", "Count", "Total", "Proportion")
+repeats_df <- mutate(repeats_df, Sample = rep(sn, sapply(repeats, nrow)), 
+                     Region = "Repeat")
+# Non-repeats
+non_repeats <- lapply(paste0(dataset, "/", 
+                             list.files(path = dataset, 
+                                        pattern = "*\\.nonrepeats.hist.all.txt")), 
+                      read.table, stringsAsFactors = FALSE, sep = "\t")
+non_repeats_df <- bind_rows(non_repeats)
+colnames(non_repeats_df) <- c("Source", "Coverage", "Count", "Total", 
+                              "Proportion")
+non_repeats_df <- mutate(non_repeats_df, 
+                         Sample = rep(sn, sapply(non_repeats, nrow)), 
+                         Region = "Non-repeat")
+cov <- rbind(repeats_df, non_repeats_df)
+
+genome_size <- as.numeric(unique(repeats_df$Total)) + 
+  as.numeric(unique(non_repeats_df$Total))
+
+g <- cov %>% 
+  group_by(Sample, Coverage) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  mutate(Total = genome_size) %>%
+  arrange(Coverage) %>%
+  group_by(Sample) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line() + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 5, nrow = 4) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme
+g
+ggsave(paste0(dataset, "_coverage.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Coverage of RepeatMasker elements is on average higher than non-masked regions!
+# Probably due to promiscuous mapping to repetitive elements.
+# Should really stratify by the repeat class, e.g., SINE, LINE, ALU, etc.
+g <- cov %>% 
+  group_by(Sample, Region, Coverage, Total) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  arrange(Coverage) %>%
+  group_by(Sample, Region) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line(aes(colour = Region)) + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 5, nrow = 4) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme + 
+  scale_colour_brewer(palette = "Dark2")
+g
+ggsave(paste0(dataset, "_coverage_repeat_stratified.pdf"), g, width = 16, 
+       height = 9)
+rm(g)
+```
+
+## Seisenberger
+```{r}
+dataset <- "Seisenberger"
+sn <- gsub(pattern = "\\.bam\\.repeats\\.hist\\.all\\.txt", replacement = "", 
+           x = list.files(path = dataset, pattern = "*\\.repeats.hist.all.txt"))
+sn <- gsub("DM\\_", "", sn)
+# Repeats
+repeats <- lapply(paste0(dataset, "/", 
+                         list.files(path = dataset, 
+                                    pattern = "*\\.repeats.hist.all.txt")), 
+                  read.table, stringsAsFactors = FALSE, sep = "\t")
+repeats_df <- bind_rows(repeats)
+colnames(repeats_df) <- c("Source", "Coverage", "Count", "Total", "Proportion")
+repeats_df <- mutate(repeats_df, Sample = rep(sn, sapply(repeats, nrow)), 
+                     Region = "Repeat")
+# Non-repeats
+non_repeats <- lapply(paste0(dataset, "/", 
+                             list.files(path = dataset, 
+                                        pattern = "*\\.nonrepeats.hist.all.txt")), 
+                      read.table, stringsAsFactors = FALSE, sep = "\t")
+non_repeats_df <- bind_rows(non_repeats)
+colnames(non_repeats_df) <- c("Source", "Coverage", "Count", "Total", 
+                              "Proportion")
+non_repeats_df <- mutate(non_repeats_df, 
+                         Sample = rep(sn, sapply(non_repeats, nrow)), 
+                         Region = "Non-repeat")
+cov <- rbind(repeats_df, non_repeats_df)
+
+genome_size <- as.numeric(unique(repeats_df$Total)) + 
+  as.numeric(unique(non_repeats_df$Total))
+
+g <- cov %>% 
+  group_by(Sample, Coverage) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  mutate(Total = genome_size) %>%
+  arrange(Coverage) %>%
+  group_by(Sample) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line() + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 3) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme
+g
+ggsave(paste0(dataset, "_coverage.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Coverage of RepeatMasker elements is on average higher than non-masked regions!
+# Probably due to promiscuous mapping to repetitive elements.
+# Should really stratify by the repeat class, e.g., SINE, LINE, ALU, etc.
+g <- cov %>% 
+  group_by(Sample, Region, Coverage, Total) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  arrange(Coverage) %>%
+  group_by(Sample, Region) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line(aes(colour = Region)) + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 3) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme + 
+  scale_colour_brewer(palette = "Dark2")
+g
+ggsave(paste0(dataset, "_coverage_repeat_stratified.pdf"), g, width = 16, 
+       height = 9)
+rm(g)
+```
+
+## Ziller
+```{r}
+dataset <- "Ziller"
+sn <- gsub(pattern = "\\.bam\\.repeats\\.hist\\.all\\.txt", replacement = "", 
+           x = list.files(path = dataset, pattern = "*\\.repeats.hist.all.txt"))
+sn <- gsub("\\.rmdup", "", sn)
+# Repeats
+repeats <- lapply(paste0(dataset, "/", 
+                         list.files(path = dataset, 
+                                    pattern = "*\\.repeats.hist.all.txt")), 
+                  read.table, stringsAsFactors = FALSE, sep = "\t")
+repeats_df <- bind_rows(repeats)
+colnames(repeats_df) <- c("Source", "Coverage", "Count", "Total", "Proportion")
+repeats_df <- mutate(repeats_df, Sample = rep(sn, sapply(repeats, nrow)), 
+                     Region = "Repeat")
+
+# Non-repeats
+non_repeats <- lapply(paste0(dataset, "/", 
+                             list.files(path = dataset, 
+                                        pattern = "*\\.nonrepeats.hist.all.txt")), 
+                      read.table, stringsAsFactors = FALSE, sep = "\t")
+non_repeats_df <- bind_rows(non_repeats)
+colnames(non_repeats_df) <- c("Source", "Coverage", "Count", "Total", 
+                              "Proportion")
+non_repeats_df <- mutate(non_repeats_df, 
+                         Sample = rep(sn, sapply(non_repeats, nrow)), 
+                         Region = "Non-repeat")
+cov <- rbind(repeats_df, non_repeats_df)
+# Drop dud samples
+cov <- cov %>%
+  filter(!Sample %in% c("SRR949200", "SRR949205"))
+
+genome_size <- as.numeric(unique(repeats_df$Total)) + 
+  as.numeric(unique(non_repeats_df$Total))
+
+g <- cov %>% 
+  group_by(Sample, Coverage) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  mutate(Total = genome_size) %>%
+  arrange(Coverage) %>%
+  group_by(Sample) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line() + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 5, nrow = 4) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme
+g
+ggsave(paste0(dataset, "_coverage.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Coverage of RepeatMasker elements is on average higher than non-masked regions!
+# Probably due to promiscuous mapping to repetitive elements.
+# Should really stratify by the repeat class, e.g., SINE, LINE, ALU, etc.
+g <- cov %>% 
+  group_by(Sample, Region, Coverage, Total) %>%
+  summarise(Count = sum(as.numeric(Count))) %>%
+  arrange(Coverage) %>%
+  group_by(Sample, Region) %>%
+  mutate(cum_prop = cumsum(as.numeric(Count)) / Total) %>%
+  ggplot(aes(x = Coverage, y = 100 * (1 - cum_prop))) + 
+  geom_line(aes(colour = Region)) + 
+  coord_cartesian(xlim = c(-5, 110), ylim = c(-5, 110)) + 
+  facet_wrap(~ Sample, ncol = 5, nrow = 4) + 
+  xlab("Sequencing coverage > x") + 
+  ylab("Percentage of genome") + 
+  ggtitle(paste0(dataset, ": Sequencing coverage")) +
+  thesis_theme + 
+  scale_colour_brewer(palette = "Dark2")
+g
+ggsave(paste0(dataset, "_coverage_repeat_stratified.pdf"), g, width = 16, 
+       height = 9)
+rm(g)
+```
+
+## Ziller merged
+
+Can't compute the sequencing coverage of the merged data from the individual replicates because these histograms are not additive.
+
+# Session info
+
+```{r}
+library(devtools)
+session_info()
+```
