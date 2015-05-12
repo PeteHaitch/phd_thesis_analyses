@@ -1,0 +1,500 @@
+---
+title: "Beta-value distributions"
+author: "Peter Hickey"
+date: "Modified: 22 April 2015. Compiled: `r format(Sys.Date(), '%d %b %Y')`"
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 16, fig.height = 9)
+```
+
+# TODO
+
+- Discuss with Terry:
+- Which gene track?
+- Figure out how to make the plot as big as possible, including the text, while keeping the text from getting sqaushed.
+- Effect of sequencing coverage
+
+# Background
+
+This document details the plots of the $\beta$-value distributions for the WGBS datasets used in my thesis, namely _EPISCOPE_, _Lister_, _Seisenberger_ and  _Ziller_. 
+
+This document must be run in `Rdevel` (i.e. `R3.2`).
+
+```{r, echo = TRUE, eval = TRUE, error = TRUE}
+knitr::opts_chunk$set(eval = FALSE)
+stopifnot(R.version$major == 3 && R.version$minor == "2.0")
+options("verbose" = TRUE)
+library(MethylationTuples)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(RColorBrewer)
+library(rtracklayer)
+thesis_theme <- theme_bw(base_size = 20)
+```
+
+# Functions
+
+Need both density and frequency plots because the scale of the feature distorts the picture in both directions.
+
+## `plotBetaDensity()`
+
+```{r}
+plotBetaDensity <- function(methpat, min_cov, dataset, nrow, ncol, 
+                            sample_order = colnames(methpat), feature = NULL, 
+                            feature_name = NULL) {
+  beta <- methLevel(methpat, min_cov = min_cov)
+  if (!identical(colnames(beta), sample_order)) {
+    beta <- beta[, sample_order]
+    }
+  if (!is.null(feature)) {
+    feature_status <- overlapsAny(methpat, feature)
+    beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                       beta = as.vector(beta),
+                       feature = rep(feature_status, times = ncol(beta)),
+                       stringsAsFactors = FALSE)
+    } else {
+      beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                         beta = as.vector(beta),
+                         stringsAsFactors = FALSE)
+      }
+  beta_df <- tbl_df(beta)
+  blank <- ggplot(aes(x = beta), data = beta_df) +
+    geom_blank(aes(y = ..scaled..), stat = "density") + 
+    scale_x_continuous(limits = c(0, 1.01), 
+                       expression(paste(beta, "-values", sep = "")))
+  if (!is.null(feature)) {
+    blank +
+      geom_density(aes(y = ..scaled.., colour = feature), 
+                   size = 1.5) +
+      facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                       "-values (min. coverage = " * .(min_cov) * " )")) +
+      labs(colour = feature_name)
+    } else {
+      blank +
+        geom_density(aes(y = ..scaled..), size = 1.5) +
+        facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+        scale_colour_brewer(palette = "Dark2") +
+        ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                         "-values (min. coverage = " * .(min_cov) * " )"))
+      }
+  }
+```
+
+## `plotBetaFreqPoly()`
+```{r, echo = TRUE, eval = TRUE, error = TRUE}
+plotBetaFreqPoly <- function(methpat, min_cov, dataset, nrow, ncol, 
+                             sample_order = colnames(methpat), feature = NULL, 
+                             feature_name = NULL) {
+  beta <- methLevel(methpat, min_cov = min_cov)
+  if (!identical(colnames(beta), sample_order)) {
+    beta <- beta[, sample_order]
+    }
+  if (!is.null(feature)) {
+    feature_status <- overlapsAny(methpat, feature)
+    beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                       beta = as.vector(beta),
+                       feature = rep(feature_status, times = ncol(beta)),
+                       stringsAsFactors = FALSE)
+    } else {
+      beta <- data.frame(Sample = rep(sample_order, each = nrow(beta)),
+                         beta = as.vector(beta),
+                         stringsAsFactors = FALSE)
+      }
+  beta_df <- tbl_df(beta)
+  # nn is the count of the non-NA beta-values for each sample, which is used to 
+  # normalise the density plots.
+  beta_df <- group_by(beta_df, Sample) %>% mutate(n = sum(!is.na(beta)))
+  # Create blank plot to get common scales based on feature-less plot
+  blank <- ggplot(aes(x = beta), data = beta_df) +
+    geom_blank(aes(n = n, y = ..count.. / n * 100), stat = "bin", 
+               binwidth = 0.01) + 
+    scale_x_continuous(limits = c(0, 1.01), 
+                       expression(paste(beta, "-values (binwidth = 0.01)", 
+                                        sep = ""))) +
+    ylab("Percentage of CpGs")
+  if (!is.null(feature)) {
+    blank +
+      geom_freqpoly(aes(n = n, y = ..count.. / n * 100, colour = feature), 
+                    binwidth = 0.01, size = 1.5) +
+      facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+      scale_colour_brewer(palette = "Dark2") +
+      ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                       "-values (min. coverage = " * .(min_cov) * " )")) +
+      labs(colour = feature_name)
+    } else {
+      blank +
+        geom_freqpoly(aes(n = n, y = ..count.. / n * 100), 
+                      binwidth = 0.01, size = 1.5) +
+        facet_wrap(~ Sample, nrow = nrow, ncol = ncol) +
+        scale_colour_brewer(palette = "Dark2") +
+        ggtitle(bquote(.(dataset) * ": " * "Distribution of " * beta * 
+                         "-values (min. coverage = " * .(min_cov) * " )"))
+      }
+  }
+```
+
+## `strandCorrelation()`
+
+```{r, echo = TRUE, eval = TRUE, error = TRUE}
+strandCorrelation <- function(methpat, min_cov){
+  methpat_fwd <- methpat[strand(methpat) == "+"]
+  methpat_rev <- methpat[strand(methpat) == "-"]
+  
+  ol <- findOverlaps(unstrand(methpat_fwd), shift(unstrand(methpat_rev), -1L), 
+                     type = "equal")
+  beta_fwd <- methLevel(methpat_fwd, min_cov = min_cov)[queryHits(ol), ]
+  beta_rev <- methLevel(methpat_rev, min_cov = min_cov)[subjectHits(ol), ]
+  i <- seq_len(ncol(methpat))
+  names(i) <- colnames(methpat)
+  sapply(i, function(ii, x, y) {
+    cor(x[, ii], y[, ii], use = "complete.obs")
+    }, x = beta_fwd, y = beta_rev)
+  }
+```
+
+## `plotStrandCorrelation()`
+
+```{r, echo = TRUE, eval = TRUE, error = TRUE}
+plotStrandCorrelation <- function(methpat, min_cov, dataset, nrow, ncol, 
+                                  sample_order = colnames(methpat)){
+  methpat_fwd <- methpat[strand(methpat) == "+"]
+  methpat_rev <- methpat[strand(methpat) == "-"]  
+  ol <- findOverlaps(unstrand(methpat_fwd), shift(unstrand(methpat_rev), -1L), 
+                     type = "equal")
+  beta_fwd <- methLevel(methpat_fwd, min_cov = min_cov)[queryHits(ol), ]
+  beta_rev <- methLevel(methpat_rev, min_cov = min_cov)[subjectHits(ol), ]
+  if (!identical(sample_order, colnames(methpat))) {
+    beta_fwd <- beta_fwd[, sample_order]
+    beta_rev <- beta_rev[, sample_order]
+    }
+  beta_pairs <- data.frame(Sample = rep(sample_order, each = nrow(beta_fwd)),
+                           beta_fwd = as.vector(beta_fwd),
+                           beta_rev = as.vector(beta_rev),
+                           stringsAsFactors = FALSE)
+  beta_pairs <- tbl_df(beta_pairs)
+  mypar <- function(a = 1, b = 1, brewer.n = 8, brewer.name = "Dark2",
+                    cex.lab = 2, cex.main = 2, cex.axis = 1.5,
+                    mar = c(5.1, 5.1, 3.5, 2.1), mgp = c(3, 1, 0), ...) {
+    par(mar = mar, mgp = mgp, cex.lab = cex.lab, cex.main = cex.main,
+        cex.axis = cex.axis)
+    par(mfrow = c(a, b), ...)
+    palette(brewer.pal(brewer.n, brewer.name))
+    }
+  mypar(nrow, ncol)
+  sapply(seq_len(ncol(beta_fwd)), function(i, x, y, ns) {
+    smoothScatter(x[, i], y[, i],
+                  xlab = expression(beta["+"]),
+                  ylab = expression(beta["-"]),
+                  main = paste0(ns[i], ": cor = ", 
+                                round(cor(x[, i], y[, i], use = "complete.obs"),
+                                      2)))
+    }, x = beta_fwd, y = beta_rev, ns = colnames(beta_fwd))
+  title(paste0(dataset, ": min_cov = ", min_cov), outer = TRUE)
+  }
+```
+
+# Analyses
+
+## EPISCOPE
+
+```{r}
+# No feature
+dataset <- "EPISCOPE"
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples_strand_collapsed.rds"))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 3, ncol = 4) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly.pdf"), g, width = 16, height = 9)
+rm(g)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 3, ncol = 4) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# CpG islands
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 3, ncol = 4, feature = cgi, 
+                      feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly_CGI.pdf"), g, width = 16, height = 9)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 3, ncol = 4, feature = cgi, 
+                     feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity_CGI.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Strand correlation
+rm(methpat)
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples.rds"))
+strand_cors <- sapply(1:10, function(i, methpat) strandCorrelation(methpat, i),
+                      methpat = methpat, simplify = TRUE)
+colnames(strand_cors) <- paste0("min_cov_", 1:10)
+write.table(strand_cors, paste0(dataset, "_strand_correlations.txt"), 
+            quote = FALSE, sep = "\t", row.names = TRUE, col.names = TRUE)
+```
+
+Other features to consider (hg19):
+
+- [x] ccdsGene
+- Yes, at least one of the "gene" tracks
+- [x] ensGene
+- Yes, at least one of the "gene" tracks
+- [x] wgEncodeGencodeV19
+- Yes, at least one of the "gene" tracks
+- [x] laminB1Lads
+- Yes
+- [x] refGene
+- Yes, at least one of the "gene" tracks
+- [x] rmsk
+- Yes, but perhaps stratify by repeat classes
+- [x] genomicSuperDups
+- No
+- [x] simpleRepeat
+- No
+- [x] knownGene
+- Yes, at least one of the "gene" tracks
+
+From txdb or similar:
+- [ ] Exons
+- [ ] Introns
+- [ ] Promoter
+
+May be better to allow `feature` to be more than `TRUE` or `FALSE`, i.e., actually annotate each CpG by a __single__ feature, particularly when doing the exon/intron/promoter plots.
+
+```{r}
+my_session <- browserSession("UCSC")
+genome(my_session) <- "hg19"
+feature <- track(ucscTableQuery(my_session, track = "knownGene"))
+feature_name <- "knownGene"
+g <- plotBetaFreqPoly(methpat = methpat[1:500000], min_cov = 10L, 
+                      dataset = dataset, nrow = 3, ncol = 4, feature = feature, 
+                      feature_name = feature_name) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("tmp.pdf", g, width = 16 height = 9)
+rm(g)
+```
+
+## Lister
+
+```{r}
+# No feature
+dataset <- "Lister"
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples_strand_collapsed.rds"))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 4, ncol = 5) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly.pdf"), g, width = 16, height = 9)
+rm(g)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 4, ncol = 5) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# CpG islands
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg18.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 4, ncol = 5, feature = cgi, 
+                      feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly_CGI.pdf"), g, width = 16, height = 9)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 4, ncol = 5, feature = cgi, 
+                     feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity_CGI.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Strand correlation
+rm(methpat)
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples.rds"))
+strand_cors <- sapply(1:10, function(i, methpat) strandCorrelation(methpat, i),
+                      methpat = methpat, simplify = TRUE)
+colnames(strand_cors) <- paste0("min_cov_", 1:10)
+write.table(strand_cors, paste0(dataset, "_strand_correlations.txt"), 
+            quote = FALSE, sep = "\t", row.names = TRUE, col.names = TRUE)
+```
+
+## Seisenberger
+
+```{r}
+# No feature
+dataset <- "Seisenberger"
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples_strand_collapsed.rds"))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 1, ncol = 3) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly.pdf"), g, width = 16, height = 9)
+rm(g)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 1, ncol = 3) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# CpG islands
+cgi <- read.table("../../CGI/model-based-cpg-islands-mm10.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+seqlevelsStyle(cgi) <- "NCBI"
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 3, ncol = 4, feature = cgi, 
+                      feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly_CGI.pdf"), g, width = 16, height = 9)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 1, ncol = 3, feature = cgi, 
+                     feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity_CGI.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Strand correlation
+rm(methpat)
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples.rds"))
+strand_cors <- sapply(1:10, function(i, methpat) strandCorrelation(methpat, i),
+                      methpat = methpat, simplify = TRUE)
+colnames(strand_cors) <- paste0("min_cov_", 1:10)
+write.table(strand_cors, paste0(dataset, "_strand_correlations.txt"), 
+            quote = FALSE, sep = "\t", row.names = TRUE, col.names = TRUE)
+```
+
+## Ziller
+
+```{r}
+# No feature
+dataset <- "Ziller"
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples_strand_collapsed.rds"))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                       nrow = 4, ncol = 5) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly.pdf"), g, width = 16, height = 9)
+rm(g)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 4, ncol = 5) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# CpG islands
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                      nrow = 4, ncol = 5, feature = cgi, 
+                      feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaFreqPoly_CGI.pdf"), g, width = 16, height = 9)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, dataset = dataset, 
+                     nrow = 4, ncol = 5, feature = cgi, 
+                     feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_plotBetaDensity_CGI.pdf"), g, width = 16, height = 9)
+rm(g)
+
+# Strand correlation
+rm(methpat)
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", dataset, 
+                          "_1_tuples.rds"))
+strand_cors <- sapply(1:10, function(i, methpat) strandCorrelation(methpat, i),
+                      methpat = methpat, simplify = TRUE)
+colnames(strand_cors) <- paste0("min_cov_", 1:10)
+write.table(strand_cors, paste0(dataset, "_strand_correlations.txt"), 
+            quote = FALSE, sep = "\t", row.names = TRUE, col.names = TRUE)
+```
+
+## Ziller merged
+
+```{r}
+# No feature
+dataset <- "Ziller"
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", 
+                          paste0(dataset, "_merged"), 
+                          "_1_tuples_strand_collapsed.rds"))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, 
+                      dataset = dataset, nrow = 3, 
+                      ncol = 3) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_merged_plotBetaFreqPoly.pdf"), g, width = 16, 
+       height = 9)
+rm(g)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, 
+                     dataset = dataset, nrow = 3, ncol = 3) + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_merged_plotBetaDensity.pdf"), g, width = 16,
+       height = 9)
+rm(g)
+
+# CpG islands
+cgi <- read.table("../../CGI/model-based-cpg-islands-hg19.txt", header = TRUE, 
+                  stringsAsFactors = FALSE)
+cgi <- GRanges(cgi$chr, IRanges(cgi$start, cgi$end))
+g <- plotBetaFreqPoly(methpat = methpat, min_cov = 10L, 
+                      dataset = dataset, nrow = 3, 
+                      ncol = 3, feature = cgi, 
+                      feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_merged_plotBetaFreqPoly_CGI.pdf"), g, width = 16, 
+       height = 9)
+g <- plotBetaDensity(methpat = methpat, min_cov = 10L, 
+                     dataset = dataset, nrow = 3, 
+                     ncol = 3, feature = cgi, feature_name = "CpG islands") + 
+  thesis_theme + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(paste0(dataset, "_merged_plotBetaDensity_CGI.pdf"), g, width = 16,
+       height = 9)
+rm(g)
+
+# Strand correlation
+rm(methpat)
+methpat <- readRDS(paste0("../processed_data/", dataset, "/", 
+                          paste0(dataset, "_merged"), "_1_tuples.rds"))
+strand_cors <- sapply(1:10, function(i, methpat) strandCorrelation(methpat, i),
+                      methpat = methpat, simplify = TRUE)
+colnames(strand_cors) <- paste0("min_cov_", 1:10)
+write.table(strand_cors, paste0(dataset, 
+                                "_strand_correlations.txt"), 
+            quote = FALSE, sep = "\t", row.names = TRUE, col.names = TRUE)
+```
+
